@@ -1,0 +1,13 @@
+*.log
+*.tmp
+*.bak
+*.swp
+
+.DS_Store
+Thumbs.db
+
+vendor/
+node_modules/
+
+uploads/
+comprobantes/
