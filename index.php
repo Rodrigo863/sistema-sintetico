@@ -677,7 +677,8 @@ $abonosPendientesCaja = $pdo->query(
      ORDER BY ap.creado_en ASC"
 )->fetchAll();
 $reservaError = trim($_GET['reserva_error'] ?? '');
-$clienteError = trim($_GET['cliente_error'] ?? '');
+$clienteError = trim($_SESSION['cliente_error'] ?? '');
+unset($_SESSION['cliente_error']);
 $canchaError = trim($_GET['cancha_error'] ?? '');
 $proveedorError = trim($_GET['proveedor_error'] ?? '');
 $productoError = trim($_GET['producto_error'] ?? '');

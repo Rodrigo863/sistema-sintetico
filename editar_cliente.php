@@ -4,6 +4,12 @@ require 'config.php';
 $id = (int)($_GET['id'] ?? 0);
 $pdo = conectarDB();
 
+function redirigirErrorCliente(string $mensaje): void
+{
+    $_SESSION['cliente_error'] = $mensaje;
+    redirigir('index.php#clientes');
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $nombre = trim($_POST['nombre'] ?? '');
     $telefono = trim($_POST['telefono'] ?? '');
@@ -14,11 +20,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $notas = trim($_POST['notas'] ?? '');
 
     if ($nombre === '') {
-        redirigir('index.php?cliente_error=' . urlencode('El nombre es obligatorio.') . '#clientes');
+        redirigirErrorCliente('El nombre es obligatorio.');
     }
 
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        redirigir('index.php?cliente_error=' . urlencode('El email no tiene un formato valido.') . '#clientes');
+        redirigirErrorCliente('El email no tiene un formato valido.');
     }
 
     if (!in_array($estado, ['activo', 'inactivo'], true)) {
@@ -30,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $clienteExistente = $stmt->fetch();
 
     if ($clienteExistente) {
-        redirigir('index.php?cliente_error=' . urlencode('Ya existe otro cliente con ese nombre: ' . $clienteExistente['nombre'] . '.') . '#clientes');
+        redirigirErrorCliente('Ya existe otro cliente con ese nombre: ' . $clienteExistente['nombre'] . '.');
     }
 
     if ($telefono !== '') {
@@ -39,7 +45,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $clienteExistente = $stmt->fetch();
 
         if ($clienteExistente) {
-            redirigir('index.php?cliente_error=' . urlencode('Ya existe otro cliente con ese telefono: ' . $clienteExistente['nombre'] . '.') . '#clientes');
+            redirigirErrorCliente('Ya existe otro cliente con ese telefono: ' . $clienteExistente['nombre'] . '.');
         }
     }
 
@@ -49,7 +55,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $clienteExistente = $stmt->fetch();
 
         if ($clienteExistente) {
-            redirigir('index.php?cliente_error=' . urlencode('Ya existe otro cliente con ese documento: ' . $clienteExistente['nombre'] . '.') . '#clientes');
+            redirigirErrorCliente('Ya existe otro cliente con ese documento: ' . $clienteExistente['nombre'] . '.');
         }
     }
 
