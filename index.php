@@ -677,6 +677,7 @@ $abonosPendientesCaja = $pdo->query(
      ORDER BY ap.creado_en ASC"
 )->fetchAll();
 $reservaError = trim($_GET['reserva_error'] ?? '');
+$clienteError = trim($_GET['cliente_error'] ?? '');
 $canchaError = trim($_GET['cancha_error'] ?? '');
 $proveedorError = trim($_GET['proveedor_error'] ?? '');
 $productoError = trim($_GET['producto_error'] ?? '');
@@ -1950,14 +1951,14 @@ include 'partials/header.php';
   </section>
 </div>
 
-<div class="modal-backdrop" id="clientMessageModal" aria-hidden="true">
+<div class="modal-backdrop <?= $clienteError !== '' ? 'open' : '' ?>" id="clientMessageModal" aria-hidden="<?= $clienteError !== '' ? 'false' : 'true' ?>">
   <section class="modal small-modal">
     <header class="modal-header">
       <h2>Aviso</h2>
       <button type="button" class="icon-button" data-close-modal>&times;</button>
     </header>
     <div class="modal-body">
-      <p class="modal-message" id="clientMessageText"></p>
+      <p class="modal-message" id="clientMessageText"><?= e($clienteError) ?></p>
       <footer class="modal-footer">
         <button type="button" data-close-modal>Entendido</button>
       </footer>

@@ -14,11 +14,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $notas = trim($_POST['notas'] ?? '');
 
     if ($nombre === '') {
-        die('El nombre es obligatorio.');
+        redirigir('index.php?cliente_error=' . urlencode('El nombre es obligatorio.') . '#clientes');
     }
 
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        die('El email no tiene un formato valido.');
+        redirigir('index.php?cliente_error=' . urlencode('El email no tiene un formato valido.') . '#clientes');
     }
 
     if (!in_array($estado, ['activo', 'inactivo'], true)) {
@@ -30,7 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $clienteExistente = $stmt->fetch();
 
     if ($clienteExistente) {
-        die('Ya existe otro cliente con ese nombre: ' . e($clienteExistente['nombre']) . '.');
+        redirigir('index.php?cliente_error=' . urlencode('Ya existe otro cliente con ese nombre: ' . $clienteExistente['nombre'] . '.') . '#clientes');
     }
 
     if ($telefono !== '') {
@@ -39,7 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $clienteExistente = $stmt->fetch();
 
         if ($clienteExistente) {
-            die('Ya existe otro cliente con ese telefono: ' . e($clienteExistente['nombre']) . '.');
+            redirigir('index.php?cliente_error=' . urlencode('Ya existe otro cliente con ese telefono: ' . $clienteExistente['nombre'] . '.') . '#clientes');
         }
     }
 
@@ -49,7 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $clienteExistente = $stmt->fetch();
 
         if ($clienteExistente) {
-            die('Ya existe otro cliente con ese documento: ' . e($clienteExistente['nombre']) . '.');
+            redirigir('index.php?cliente_error=' . urlencode('Ya existe otro cliente con ese documento: ' . $clienteExistente['nombre'] . '.') . '#clientes');
         }
     }
 

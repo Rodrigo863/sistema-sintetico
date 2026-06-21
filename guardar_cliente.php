@@ -13,11 +13,11 @@ $direccion = trim($_POST['direccion'] ?? '');
 $notas = trim($_POST['notas'] ?? '');
 
 if ($nombre === '') {
-    die('El nombre es obligatorio.');
+    redirigir('index.php?cliente_error=' . urlencode('El nombre es obligatorio.') . '#clientes');
 }
 
 if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-    die('El email no tiene un formato valido.');
+    redirigir('index.php?cliente_error=' . urlencode('El email no tiene un formato valido.') . '#clientes');
 }
 
 $pdo = conectarDB();
@@ -27,7 +27,7 @@ $stmt->execute([$nombre]);
 $clienteExistente = $stmt->fetch();
 
 if ($clienteExistente) {
-    die('Ya existe un cliente con ese nombre: ' . e($clienteExistente['nombre']) . '.');
+    redirigir('index.php?cliente_error=' . urlencode('Ya existe un cliente con ese nombre: ' . $clienteExistente['nombre'] . '.') . '#clientes');
 }
 
 if ($telefono !== '') {
@@ -36,7 +36,7 @@ if ($telefono !== '') {
     $clienteExistente = $stmt->fetch();
 
     if ($clienteExistente) {
-        die('Ya existe un cliente con ese telefono: ' . e($clienteExistente['nombre']) . '.');
+        redirigir('index.php?cliente_error=' . urlencode('Ya existe un cliente con ese telefono: ' . $clienteExistente['nombre'] . '.') . '#clientes');
     }
 }
 
@@ -46,7 +46,7 @@ if ($documento !== '') {
     $clienteExistente = $stmt->fetch();
 
     if ($clienteExistente) {
-        die('Ya existe un cliente con ese documento: ' . e($clienteExistente['nombre']) . '.');
+        redirigir('index.php?cliente_error=' . urlencode('Ya existe un cliente con ese documento: ' . $clienteExistente['nombre'] . '.') . '#clientes');
     }
 }
 
