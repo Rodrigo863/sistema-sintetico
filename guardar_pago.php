@@ -129,4 +129,5 @@ if ($reserva['estado'] !== 'cancelado' && $totalReserva > 0 && $totalPagado >= $
 
 $pdo->commit();
 
-redirigir('index.php?pago_ticket=' . $pagoId . '#reservas');
+$_SESSION['pago_ticket_id'] = $pagoId;
+redirigir('index.php#reservas');

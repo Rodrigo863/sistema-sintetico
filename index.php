@@ -778,7 +778,8 @@ $ventaForm = [
     'observacion' => trim($_GET['venta_observacion'] ?? ''),
 ];
 $pagoTicket = null;
-$pagoTicketId = (int)($_GET['pago_ticket'] ?? 0);
+$pagoTicketId = (int)($_SESSION['pago_ticket_id'] ?? 0);
+unset($_SESSION['pago_ticket_id']);
 $reservaDetalleId = (int)($_GET['reserva_detalle'] ?? 0);
 $reservasConComprobantePendiente = array_filter($reservas, static function (array $reserva): bool {
     return !empty($reserva['abono_pendiente_comprobante_path'])
@@ -2683,7 +2684,31 @@ include 'partials/header.php';
   function showModule(moduleId) {
     modules.forEach((module) => module.classList.toggle('active', module.id === moduleId));
     menuButtons.forEach((button) => button.classList.toggle('active', button.dataset.target === moduleId));
-    history.replaceState(null, '', '#' + moduleId);
+    const url = new URL(window.location.href);
+    history.replaceState(null, '', `${url.pathname}${url.search}#${moduleId}`);
+  }
+
+  function clearTransientUrlParams() {
+    const url = new URL(window.location.href);
+    [
+      'pago_ticket',
+      'reserva_detalle',
+      'cliente_error',
+      'reserva_error',
+      'cancha_error',
+      'proveedor_error',
+      'producto_error',
+      'compra_error',
+      'venta_error',
+      'caja_error',
+      'caja_mensaje',
+      'usuario_error',
+      'usuario_mensaje'
+    ].forEach((param) => url.searchParams.delete(param));
+
+    const cleanSearch = url.searchParams.toString();
+    const cleanUrl = `${url.pathname}${cleanSearch ? `?${cleanSearch}` : ''}${url.hash || window.location.hash}`;
+    history.replaceState(null, '', cleanUrl);
   }
 
   function hasPendingReceipt(item) {
@@ -5393,6 +5418,7 @@ include 'partials/header.php';
   if (document.getElementById(initialModule)) {
     showModule(initialModule);
   }
+  clearTransientUrlParams();
 
   renderCourtTabs();
   updateReservationMenuNotification();
