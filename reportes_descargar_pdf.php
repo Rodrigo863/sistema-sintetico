@@ -137,19 +137,19 @@ final class ReportePdf
     {
         $font = $bold ? 'F2' : 'F1';
         $pdfY = $this->h - $y;
-        $this->content .= "BT /{$font} {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
+        $this->content .= "0 0 0 rg BT /{$font} {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
     }
 
     private function line(float $x1, float $y1, float $x2, float $y2): void
     {
-        $this->content .= "0.5 w {$x1} " . ($this->h - $y1) . " m {$x2} " . ($this->h - $y2) . " l S\n";
+        $this->content .= "0.35 0.42 0.50 RG 0.6 w {$x1} " . ($this->h - $y1) . " m {$x2} " . ($this->h - $y2) . " l S\n";
     }
 
     private function rect(float $x, float $y, float $w, float $h, bool $filled = false): void
     {
         $pdfY = $this->h - $y - $h;
         $style = $filled ? '0.90 0.94 0.97 rg' : '1 1 1 rg';
-        $this->content .= "{$style} {$x} {$pdfY} {$w} {$h} re f 0.75 0.82 0.90 RG {$x} {$pdfY} {$w} {$h} re S\n";
+        $this->content .= "{$style} {$x} {$pdfY} {$w} {$h} re f 0.62 0.70 0.80 RG 0.6 w {$x} {$pdfY} {$w} {$h} re S\n";
     }
 
     public function output(): string
