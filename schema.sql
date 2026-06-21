@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS venta_detalles (
   cantidad INT NOT NULL,
   unidades_descontadas INT NOT NULL DEFAULT 0,
   precio_unitario DECIMAL(10,2) NOT NULL,
+  costo_unitario DECIMAL(10,2) DEFAULT NULL,
   subtotal DECIMAL(10,2) NOT NULL,
   CONSTRAINT fk_detalles_venta FOREIGN KEY (venta_id) REFERENCES ventas(id),
   CONSTRAINT fk_detalles_producto FOREIGN KEY (producto_id) REFERENCES productos(id)
@@ -168,6 +169,7 @@ ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'anulada') NOT
 ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante_path VARCHAR(255) DEFAULT NULL AFTER observacion;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS tipo_venta ENUM('unidad', 'pack') NOT NULL DEFAULT 'unidad' AFTER producto_id;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS unidades_descontadas INT NOT NULL DEFAULT 0 AFTER cantidad;
+ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario;
 
 INSERT IGNORE INTO producto_categorias (nombre)
 SELECT DISTINCT TRIM(categoria)

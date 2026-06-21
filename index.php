@@ -3,6 +3,7 @@ require 'config.php';
 
 $pdo = conectarDB();
 $pdo->exec("ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa' AFTER metodo");
+$pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
 $pdo->exec("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante_path VARCHAR(255) DEFAULT NULL AFTER observacion");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
@@ -704,7 +705,7 @@ $stmt = $pdo->prepare(
      FROM ventas v
      LEFT JOIN (
        SELECT vd.venta_id,
-              SUM(vd.subtotal - (vd.unidades_descontadas * COALESCE(p.precio_compra, 0))) AS ganancia
+              SUM(vd.subtotal - (vd.unidades_descontadas * COALESCE(vd.costo_unitario, p.precio_compra, 0))) AS ganancia
        FROM venta_detalles vd
        INNER JOIN productos p ON p.id = vd.producto_id
        GROUP BY vd.venta_id
@@ -751,7 +752,7 @@ $stmt = $pdo->prepare(
      FROM ventas v
      LEFT JOIN (
        SELECT vd.venta_id,
-              SUM(vd.subtotal - (vd.unidades_descontadas * COALESCE(p.precio_compra, 0))) AS ganancia
+              SUM(vd.subtotal - (vd.unidades_descontadas * COALESCE(vd.costo_unitario, p.precio_compra, 0))) AS ganancia
        FROM venta_detalles vd
        INNER JOIN productos p ON p.id = vd.producto_id
        GROUP BY vd.venta_id
@@ -1408,7 +1409,7 @@ include 'partials/header.php';
           <button type="button" class="add-client-button" data-add-category="productoCategoria" title="Agregar categor&iacute;a">+</button>
           <div class="autocomplete-list" data-category-suggestions-for="productoCategoria"></div>
         </div>
-        <label>Precio compra <input type="text" name="precio_compra" class="money-input" inputmode="numeric" value="0"></label>
+        <label>Precio compra unidad <input type="text" name="precio_compra" class="money-input" inputmode="numeric" value="0"></label>
         <label>Precio unidad <input type="text" name="precio_venta" class="money-input" inputmode="numeric" required></label>
         <label>Unidades por pack <input type="number" name="pack_cantidad" min="0" step="1" value="0"></label>
         <label>Precio pack <input type="text" name="precio_pack" class="money-input" inputmode="numeric" value="0"></label>
@@ -1432,7 +1433,7 @@ include 'partials/header.php';
         </form>
       </div>
       <table>
-        <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Categor&iacute;a</th><th>Compra</th><th>Unidad</th><th>Pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
+        <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Unidad</th><th>Pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
         <tbody id="productInventoryRows">
           <?php if (empty($productosInventario)): ?>
             <tr><td colspan="9">Todav&iacute;a no hay productos cargados.</td></tr>
@@ -1989,7 +1990,7 @@ include 'partials/header.php';
           <button type="button" class="add-client-button" data-add-category="quickProductCategoria" title="Agregar categor&iacute;a">+</button>
           <div class="autocomplete-list" data-category-suggestions-for="quickProductCategoria"></div>
         </div>
-        <label>Precio compra <input type="text" name="precio_compra" id="quickProductCompra" class="money-input" inputmode="numeric" value="0"></label>
+        <label>Precio compra unidad <input type="text" name="precio_compra" id="quickProductCompra" class="money-input" inputmode="numeric" value="0"></label>
         <label>Precio unidad <input type="text" name="precio_venta" class="money-input" inputmode="numeric" value="0"></label>
         <label>Unidades por pack <input type="number" name="pack_cantidad" min="0" step="1" value="0"></label>
         <label>Precio pack <input type="text" name="precio_pack" class="money-input" inputmode="numeric" value="0"></label>
@@ -2093,7 +2094,7 @@ include 'partials/header.php';
           <button type="button" class="add-client-button" data-add-category="editProductoCategoria" title="Agregar categor&iacute;a">+</button>
           <div class="autocomplete-list" data-category-suggestions-for="editProductoCategoria"></div>
         </div>
-        <label>Precio compra <input type="text" name="precio_compra" id="editProductoCompra" class="money-input" inputmode="numeric" required></label>
+        <label>Precio compra unidad <input type="text" name="precio_compra" id="editProductoCompra" class="money-input" inputmode="numeric" required></label>
         <label>Precio unidad <input type="text" name="precio_venta" id="editProductoVenta" class="money-input" inputmode="numeric" required></label>
         <label>Unidades por pack <input type="number" name="pack_cantidad" id="editProductoPackCantidad" min="0" step="1" required></label>
         <label>Precio pack <input type="text" name="precio_pack" id="editProductoPackPrecio" class="money-input" inputmode="numeric" required></label>
@@ -3093,7 +3094,7 @@ include 'partials/header.php';
       const option = document.createElement('button');
       option.type = 'button';
       option.className = 'autocomplete-option';
-      option.innerHTML = `<strong>${escapeHtml(product.nombre)}</strong><span>${escapeHtml(product.codigo_barra || product.categoria || '')} | Stock ${Number(product.stock || 0)} | Compra ${money(product.precio_compra)}</span>`;
+      option.innerHTML = `<strong>${escapeHtml(product.nombre)}</strong><span>${escapeHtml(product.codigo_barra || product.categoria || '')} | Stock ${Number(product.stock || 0)} | Compra unidad ${money(product.precio_compra)}</span>`;
       option.addEventListener('click', () => selectPurchaseProduct(product));
       purchaseProductSuggestions.appendChild(option);
     });

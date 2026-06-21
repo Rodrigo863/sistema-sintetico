@@ -83,6 +83,7 @@ if (empty($lineas)) {
 
 $pdo = conectarDB();
 $pdo->exec("ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa' AFTER metodo");
+$pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
 $pdo->beginTransaction();
 
 $stmt = $pdo->prepare('SELECT * FROM ventas WHERE id = ? FOR UPDATE');
@@ -178,6 +179,7 @@ foreach ($lineas as $linea) {
     $tipoVenta = $linea['tipo_venta'];
     $unidadesDescontadas = $cantidad;
     $precioUnitario = (float)$producto['precio_venta'];
+    $costoUnitario = (float)$producto['precio_compra'];
 
     if ($tipoVenta === 'pack') {
         if ((int)$producto['pack_cantidad'] <= 0 || (float)$producto['precio_pack'] <= 0) {
@@ -200,6 +202,7 @@ foreach ($lineas as $linea) {
         'cantidad' => $cantidad,
         'unidades_descontadas' => $unidadesDescontadas,
         'precio_unitario' => $precioUnitario,
+        'costo_unitario' => $costoUnitario,
         'subtotal' => $subtotal,
     ];
 }
@@ -226,8 +229,8 @@ $stmt = $pdo->prepare('DELETE FROM venta_detalles WHERE venta_id = ?');
 $stmt->execute([$ventaId]);
 
 $stmtDetalle = $pdo->prepare(
-    'INSERT INTO venta_detalles (venta_id, producto_id, tipo_venta, cantidad, unidades_descontadas, precio_unitario, subtotal)
-     VALUES (?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO venta_detalles (venta_id, producto_id, tipo_venta, cantidad, unidades_descontadas, precio_unitario, costo_unitario, subtotal)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
 );
 foreach ($detalles as $detalle) {
     $stmtDetalle->execute([
@@ -237,6 +240,7 @@ foreach ($detalles as $detalle) {
         $detalle['cantidad'],
         $detalle['unidades_descontadas'],
         $detalle['precio_unitario'],
+        $detalle['costo_unitario'],
         $detalle['subtotal'],
     ]);
 }
