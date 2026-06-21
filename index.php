@@ -683,6 +683,90 @@ $proveedorError = trim($_GET['proveedor_error'] ?? '');
 $productoError = trim($_GET['producto_error'] ?? '');
 $compraError = trim($_GET['compra_error'] ?? '');
 $ventaError = trim($_GET['venta_error'] ?? '');
+
+$reporteDesde = trim($_GET['reporte_desde'] ?? $hoy);
+$reporteHasta = trim($_GET['reporte_hasta'] ?? $hoy);
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $reporteDesde)) {
+    $reporteDesde = $hoy;
+}
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $reporteHasta)) {
+    $reporteHasta = $hoy;
+}
+if ($reporteDesde > $reporteHasta) {
+    [$reporteDesde, $reporteHasta] = [$reporteHasta, $reporteDesde];
+}
+
+$stmt = $pdo->prepare(
+    "SELECT COUNT(DISTINCT v.id) AS cantidad_ventas,
+            COALESCE(SUM(v.total), 0) AS total_ventas,
+            COALESCE(SUM(COALESCE(detalles.ganancia, 0)), 0) AS ganancia_ventas
+     FROM ventas v
+     LEFT JOIN (
+       SELECT vd.venta_id,
+              SUM(vd.subtotal - (vd.unidades_descontadas * COALESCE(p.precio_compra, 0))) AS ganancia
+       FROM venta_detalles vd
+       INNER JOIN productos p ON p.id = vd.producto_id
+       GROUP BY vd.venta_id
+     ) detalles ON detalles.venta_id = v.id
+     WHERE v.estado <> 'anulada'
+       AND DATE(v.fecha_venta) BETWEEN ? AND ?"
+);
+$stmt->execute([$reporteDesde, $reporteHasta]);
+$reporteVentas = $stmt->fetch() ?: [];
+
+$stmt = $pdo->prepare(
+    "SELECT COUNT(*) AS total_reservas,
+            COALESCE(SUM(CASE WHEN estado <> 'cancelado' THEN precio_total ELSE 0 END), 0) AS total_reservado,
+            SUM(CASE WHEN estado = 'cancelado' THEN 1 ELSE 0 END) AS reservas_canceladas,
+            SUM(CASE WHEN estado <> 'cancelado' THEN 1 ELSE 0 END) AS reservas_activas
+     FROM reservas
+     WHERE fecha BETWEEN ? AND ?"
+);
+$stmt->execute([$reporteDesde, $reporteHasta]);
+$reporteReservas = $stmt->fetch() ?: [];
+
+$stmt = $pdo->prepare(
+    "SELECT fecha,
+            SUM(CASE WHEN estado <> 'cancelado' THEN 1 ELSE 0 END) AS reservas_activas,
+            SUM(CASE WHEN estado = 'cancelado' THEN 1 ELSE 0 END) AS reservas_canceladas,
+            COALESCE(SUM(CASE WHEN estado <> 'cancelado' THEN precio_total ELSE 0 END), 0) AS total_reservado
+     FROM reservas
+     WHERE fecha BETWEEN ? AND ?
+     GROUP BY fecha
+     ORDER BY fecha ASC"
+);
+$stmt->execute([$reporteDesde, $reporteHasta]);
+$reporteReservasPorDia = [];
+foreach ($stmt->fetchAll() as $fila) {
+    $reporteReservasPorDia[$fila['fecha']] = $fila;
+}
+
+$stmt = $pdo->prepare(
+    "SELECT DATE(v.fecha_venta) AS fecha,
+            COUNT(DISTINCT v.id) AS cantidad_ventas,
+            COALESCE(SUM(v.total), 0) AS total_ventas,
+            COALESCE(SUM(COALESCE(detalles.ganancia, 0)), 0) AS ganancia_ventas
+     FROM ventas v
+     LEFT JOIN (
+       SELECT vd.venta_id,
+              SUM(vd.subtotal - (vd.unidades_descontadas * COALESCE(p.precio_compra, 0))) AS ganancia
+       FROM venta_detalles vd
+       INNER JOIN productos p ON p.id = vd.producto_id
+       GROUP BY vd.venta_id
+     ) detalles ON detalles.venta_id = v.id
+     WHERE v.estado <> 'anulada'
+       AND DATE(v.fecha_venta) BETWEEN ? AND ?
+     GROUP BY DATE(v.fecha_venta)
+     ORDER BY fecha ASC"
+);
+$stmt->execute([$reporteDesde, $reporteHasta]);
+$reporteVentasPorDia = [];
+foreach ($stmt->fetchAll() as $fila) {
+    $reporteVentasPorDia[$fila['fecha']] = $fila;
+}
+
+$reporteFechas = array_unique(array_merge(array_keys($reporteReservasPorDia), array_keys($reporteVentasPorDia)));
+sort($reporteFechas);
 $ventaTipo = $_GET['venta_tipo'] ?? 'unidad';
 $ventaMetodo = $_GET['venta_metodo'] ?? 'efectivo';
 $ventaForm = [
@@ -755,6 +839,7 @@ include 'partials/header.php';
     <button type="button" data-target="productos">Productos</button>
     <button type="button" data-target="compras">Compras</button>
     <button type="button" data-target="ventas">Ventas</button>
+    <button type="button" data-target="reportes">Reportes</button>
     <button type="button" data-target="configuracion">Configuraci&oacute;n</button>
   </nav>
 
@@ -777,6 +862,80 @@ include 'partials/header.php';
         <strong><?= formatearGuaranies($saldoPendiente) ?></strong>
       </article>
     </div>
+  </section>
+
+  <section class="module" id="reportes">
+    <article class="panel">
+      <div class="section-header">
+        <div>
+          <h2>Reportes</h2>
+          <span class="muted">Resumen general por rango de fechas.</span>
+        </div>
+        <form action="index.php#reportes" method="get" class="search-form">
+          <input type="date" name="reporte_desde" value="<?= e($reporteDesde) ?>">
+          <input type="date" name="reporte_hasta" value="<?= e($reporteHasta) ?>">
+          <button type="submit" class="small">Ver resumen</button>
+        </form>
+      </div>
+
+      <div class="stats">
+        <article class="stat">
+          <span>Total de ventas</span>
+          <strong><?= formatearGuaranies($reporteVentas['total_ventas'] ?? 0) ?></strong>
+          <small><?= (int)($reporteVentas['cantidad_ventas'] ?? 0) ?> venta(s)</small>
+        </article>
+        <article class="stat">
+          <span>Ganancia ventas</span>
+          <strong><?= formatearGuaranies($reporteVentas['ganancia_ventas'] ?? 0) ?></strong>
+          <small>Venta menos costo de productos</small>
+        </article>
+        <article class="stat">
+          <span>Total reservas</span>
+          <strong><?= (int)($reporteReservas['reservas_activas'] ?? 0) ?></strong>
+          <small><?= (int)($reporteReservas['reservas_canceladas'] ?? 0) ?> cancelada(s)</small>
+        </article>
+        <article class="stat">
+          <span>Monto reservado</span>
+          <strong><?= formatearGuaranies($reporteReservas['total_reservado'] ?? 0) ?></strong>
+          <small>No incluye canceladas</small>
+        </article>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha</th>
+            <th>Ventas</th>
+            <th>Total ventas</th>
+            <th>Ganancia ventas</th>
+            <th>Reservas</th>
+            <th>Monto reservas</th>
+            <th>Canceladas</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php if (empty($reporteFechas)): ?>
+            <tr><td colspan="7">No hay movimientos en el rango seleccionado.</td></tr>
+          <?php else: ?>
+            <?php foreach ($reporteFechas as $fechaReporte): ?>
+              <?php
+                $ventasDia = $reporteVentasPorDia[$fechaReporte] ?? [];
+                $reservasDia = $reporteReservasPorDia[$fechaReporte] ?? [];
+              ?>
+              <tr>
+                <td><?= e(date('d/m/Y', strtotime($fechaReporte))) ?></td>
+                <td><?= (int)($ventasDia['cantidad_ventas'] ?? 0) ?></td>
+                <td><?= formatearGuaranies($ventasDia['total_ventas'] ?? 0) ?></td>
+                <td><?= formatearGuaranies($ventasDia['ganancia_ventas'] ?? 0) ?></td>
+                <td><?= (int)($reservasDia['reservas_activas'] ?? 0) ?></td>
+                <td><?= formatearGuaranies($reservasDia['total_reservado'] ?? 0) ?></td>
+                <td><?= (int)($reservasDia['reservas_canceladas'] ?? 0) ?></td>
+              </tr>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </tbody>
+      </table>
+    </article>
   </section>
 
   <section class="module" id="caja">

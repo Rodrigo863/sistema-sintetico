@@ -58,6 +58,7 @@ p { color: #55647a; margin: 0; font-size: 0.98rem; }
 .stat { background: #ffffff; border: 1px solid #d8e0ec; border-radius: 8px; padding: 14px; }
 .stat span { display: block; color: #64748b; font-size: 0.88rem; margin-bottom: 4px; }
 .stat strong { font-size: 1.45rem; color: #0f766e; }
+.stat small { display: block; margin-top: 4px; color: #64748b; font-size: 0.78rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; align-items: end; }
 .grid.compact { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .grid.compact.purchase-grid {
