@@ -145,7 +145,8 @@ $tituloRango = date('d/m/Y', strtotime($reporteDesde)) . ' al ' . date('d/m/Y', 
     <div>Reporte detallado - <?= e($tituloRango) ?></div>
     <div>
       <a href="index.php?reporte_desde=<?= e($reporteDesde) ?>&reporte_hasta=<?= e($reporteHasta) ?>#reportes">Volver</a>
-      <button type="button" onclick="window.print()">Descargar / guardar PDF</button>
+      <a href="reportes_descargar_pdf.php?reporte_desde=<?= e($reporteDesde) ?>&reporte_hasta=<?= e($reporteHasta) ?>">Descargar PDF</a>
+      <button type="button" onclick="window.print()">Imprimir</button>
     </div>
   </div>
 
@@ -260,10 +261,5 @@ $tituloRango = date('d/m/Y', strtotime($reporteDesde)) . ' al ' . date('d/m/Y', 
       </tbody>
     </table>
   </main>
-  <script>
-    window.addEventListener('load', () => {
-      setTimeout(() => window.print(), 300);
-    });
-  </script>
 </body>
 </html>
