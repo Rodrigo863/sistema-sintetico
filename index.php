@@ -879,6 +879,7 @@ include 'partials/header.php';
           <input type="date" name="reporte_desde" value="<?= e($reporteDesde) ?>">
           <input type="date" name="reporte_hasta" value="<?= e($reporteHasta) ?>">
           <button type="submit" class="small">Ver resumen</button>
+          <a class="btn small secondary" target="_blank" href="reportes_pdf.php?reporte_desde=<?= e($reporteDesde) ?>&reporte_hasta=<?= e($reporteHasta) ?>">Descargar PDF</a>
         </form>
       </div>
 
