@@ -161,7 +161,7 @@ final class ReportePdf
 
         $objects = [];
         $objects[] = '<< /Type /Catalog /Pages 2 0 R >>';
-        $objects[] = '<< /Type /Pages /Kids [' . implode(' ', array_map(fn($i) => (($i * 2) + 3) . ' 0 R', array_keys($this->pages))) . '] /Count ' . count($this->pages) . ' >>';
+        $objects[] = '<< /Type /Pages /Kids [' . implode(' ', array_map(fn($i) => (($i * 2) + 5) . ' 0 R', array_keys($this->pages))) . '] /Count ' . count($this->pages) . ' >>';
         $objects[] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
         $objects[] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>';
 
