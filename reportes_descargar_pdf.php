@@ -79,8 +79,8 @@ final class ReportePdf
         $this->ensureSpace(34);
         $x = 28;
         $headerY = $this->y;
-        $this->rect(28, $headerY, 786, 16, true);
         foreach ($columns as $column) {
+            $this->rect($x, $headerY, $column['w'], 16, true);
             $this->text($x + 3, $headerY + 11, $column['label'], 7, true);
             $x += $column['w'];
         }
@@ -103,23 +103,27 @@ final class ReportePdf
         $this->ensureSpace(17);
         $x = 28;
         $rowHeight = 16;
-        $this->line(28, $this->y, 814, $this->y);
 
         if (isset($row[0]['colspan'])) {
-            $this->text(31, $this->y + 11, $row[0]['text'], 7);
+            $totalWidth = array_sum(array_column($columns, 'w'));
+            $this->rect(28, $this->y, $totalWidth, $rowHeight);
+            $this->tableText(31, $this->y + 11, $row[0]['text'], 6.5);
             $this->y += $rowHeight;
             return;
         }
 
         foreach ($columns as $i => $column) {
             $value = (string)($row[$i] ?? '');
-            $maxChars = max(5, (int)floor($column['w'] / 4.2));
+            $this->rect($x, $this->y, $column['w'], $rowHeight);
+            $fontSize = (float)($column['font_size'] ?? 6.2);
+            $charWidth = $fontSize * 0.58;
+            $maxChars = max(5, (int)floor(($column['w'] - 6) / $charWidth));
             if (strlen($value) > $maxChars) {
                 $value = substr($value, 0, max(0, $maxChars - 3)) . '...';
             }
             $align = $column['align'] ?? 'left';
-            $textX = $align === 'right' ? $x + $column['w'] - 4 - (strlen($value) * 3.6) : $x + 3;
-            $this->text(max($x + 3, $textX), $this->y + 11, $value, 7);
+            $textX = $align === 'right' ? $x + $column['w'] - 3 - (strlen($value) * $charWidth) : $x + 3;
+            $this->tableText(max($x + 3, $textX), $this->y + 11, $value, $fontSize);
             $x += $column['w'];
         }
 
@@ -138,6 +142,12 @@ final class ReportePdf
         $font = $bold ? 'F2' : 'F1';
         $pdfY = $this->h - $y;
         $this->content .= "0 0 0 rg BT /{$font} {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
+    }
+
+    private function tableText(float $x, float $y, string $text, float $size = 6.2): void
+    {
+        $pdfY = $this->h - $y;
+        $this->content .= "0 0 0 rg BT /F3 {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
     }
 
     private function line(float $x1, float $y1, float $x2, float $y2): void
@@ -161,13 +171,15 @@ final class ReportePdf
 
         $objects = [];
         $objects[] = '<< /Type /Catalog /Pages 2 0 R >>';
-        $objects[] = '<< /Type /Pages /Kids [' . implode(' ', array_map(fn($i) => (($i * 2) + 5) . ' 0 R', array_keys($this->pages))) . '] /Count ' . count($this->pages) . ' >>';
+        $objects[] = '<< /Type /Pages /Kids [' . implode(' ', array_map(fn($i) => (($i * 2) + 7) . ' 0 R', array_keys($this->pages))) . '] /Count ' . count($this->pages) . ' >>';
         $objects[] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
         $objects[] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>';
+        $objects[] = '<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>';
+        $objects[] = '<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold >>';
 
         foreach ($this->pages as $content) {
             $contentId = count($objects) + 2;
-            $objects[] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {$this->w} {$this->h}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {$contentId} 0 R >>";
+            $objects[] = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {$this->w} {$this->h}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents {$contentId} 0 R >>";
             $objects[] = "<< /Length " . strlen($content) . " >>\nstream\n{$content}endstream";
         }
 
