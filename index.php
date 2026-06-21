@@ -716,24 +716,25 @@ $stmt->execute([$reporteDesde, $reporteHasta]);
 $reporteVentas = $stmt->fetch() ?: [];
 
 $stmt = $pdo->prepare(
-    "SELECT COUNT(*) AS total_reservas,
-            COALESCE(SUM(CASE WHEN estado <> 'cancelado' THEN precio_total ELSE 0 END), 0) AS total_reservado,
-            SUM(CASE WHEN estado = 'cancelado' THEN 1 ELSE 0 END) AS reservas_canceladas,
-            SUM(CASE WHEN estado <> 'cancelado' THEN 1 ELSE 0 END) AS reservas_activas
-     FROM reservas
-     WHERE fecha BETWEEN ? AND ?"
+    "SELECT COUNT(DISTINCT p.reserva_id) AS reservas_pagadas,
+            COUNT(*) AS pagos_registrados,
+            COALESCE(SUM(p.monto), 0) AS total_cobrado_reservas
+     FROM pagos p
+     INNER JOIN reservas r ON r.id = p.reserva_id
+     WHERE DATE(p.fecha_pago) BETWEEN ? AND ?"
 );
 $stmt->execute([$reporteDesde, $reporteHasta]);
 $reporteReservas = $stmt->fetch() ?: [];
 
 $stmt = $pdo->prepare(
-    "SELECT fecha,
-            SUM(CASE WHEN estado <> 'cancelado' THEN 1 ELSE 0 END) AS reservas_activas,
-            SUM(CASE WHEN estado = 'cancelado' THEN 1 ELSE 0 END) AS reservas_canceladas,
-            COALESCE(SUM(CASE WHEN estado <> 'cancelado' THEN precio_total ELSE 0 END), 0) AS total_reservado
-     FROM reservas
-     WHERE fecha BETWEEN ? AND ?
-     GROUP BY fecha
+    "SELECT DATE(p.fecha_pago) AS fecha,
+            COUNT(DISTINCT p.reserva_id) AS reservas_pagadas,
+            COUNT(*) AS pagos_registrados,
+            COALESCE(SUM(p.monto), 0) AS total_cobrado_reservas
+     FROM pagos p
+     INNER JOIN reservas r ON r.id = p.reserva_id
+     WHERE DATE(p.fecha_pago) BETWEEN ? AND ?
+     GROUP BY DATE(p.fecha_pago)
      ORDER BY fecha ASC"
 );
 $stmt->execute([$reporteDesde, $reporteHasta]);
@@ -892,14 +893,14 @@ include 'partials/header.php';
           <small>Venta menos costo de productos</small>
         </article>
         <article class="stat">
-          <span>Total reservas</span>
-          <strong><?= (int)($reporteReservas['reservas_activas'] ?? 0) ?></strong>
-          <small><?= (int)($reporteReservas['reservas_canceladas'] ?? 0) ?> cancelada(s)</small>
+          <span>Reservas cobradas</span>
+          <strong><?= (int)($reporteReservas['reservas_pagadas'] ?? 0) ?></strong>
+          <small><?= (int)($reporteReservas['pagos_registrados'] ?? 0) ?> pago(s)</small>
         </article>
         <article class="stat">
-          <span>Monto reservado</span>
-          <strong><?= formatearGuaranies($reporteReservas['total_reservado'] ?? 0) ?></strong>
-          <small>No incluye canceladas</small>
+          <span>Ingresos reservas</span>
+          <strong><?= formatearGuaranies($reporteReservas['total_cobrado_reservas'] ?? 0) ?></strong>
+          <small>Segun fecha de pago</small>
         </article>
       </div>
 
@@ -910,9 +911,9 @@ include 'partials/header.php';
             <th>Ventas</th>
             <th>Total ventas</th>
             <th>Ganancia ventas</th>
-            <th>Reservas</th>
-            <th>Monto reservas</th>
-            <th>Canceladas</th>
+            <th>Reservas cobradas</th>
+            <th>Ingresos reservas</th>
+            <th>Pagos</th>
           </tr>
         </thead>
         <tbody>
@@ -929,9 +930,9 @@ include 'partials/header.php';
                 <td><?= (int)($ventasDia['cantidad_ventas'] ?? 0) ?></td>
                 <td><?= formatearGuaranies($ventasDia['total_ventas'] ?? 0) ?></td>
                 <td><?= formatearGuaranies($ventasDia['ganancia_ventas'] ?? 0) ?></td>
-                <td><?= (int)($reservasDia['reservas_activas'] ?? 0) ?></td>
-                <td><?= formatearGuaranies($reservasDia['total_reservado'] ?? 0) ?></td>
-                <td><?= (int)($reservasDia['reservas_canceladas'] ?? 0) ?></td>
+                <td><?= (int)($reservasDia['reservas_pagadas'] ?? 0) ?></td>
+                <td><?= formatearGuaranies($reservasDia['total_cobrado_reservas'] ?? 0) ?></td>
+                <td><?= (int)($reservasDia['pagos_registrados'] ?? 0) ?></td>
               </tr>
             <?php endforeach; ?>
           <?php endif; ?>
