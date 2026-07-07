@@ -96,8 +96,6 @@ include 'partials/header.php';
           <select name="metodo" id="modalReservaMetodo">
             <option value="efectivo">Efectivo</option>
             <option value="transferencia">Transferencia</option>
-            <option value="tarjeta">Tarjeta</option>
-            <option value="otro">Otro</option>
           </select>
         </label>
         <label>Comprobante
@@ -172,6 +170,46 @@ include 'partials/header.php';
   let publicReservationSubmitConfirmed = false;
   const mobileCalendarMedia = window.matchMedia('(max-width: 700px)');
 
+  function shouldProtectSubmit(form) {
+    const action = form.getAttribute('action') || '';
+    return action.includes('guardar_reserva_publica.php');
+  }
+
+  function lockSubmitForm(form, submitter = null) {
+    if (!shouldProtectSubmit(form)) {
+      return;
+    }
+
+    form.dataset.submitting = '1';
+    const buttons = new Set(Array.from(form.querySelectorAll('button[type="submit"], input[type="submit"]')));
+    if (form.id) {
+      document.querySelectorAll(`button[form="${form.id}"], input[form="${form.id}"]`).forEach((button) => buttons.add(button));
+    }
+    if (submitter) {
+      buttons.add(submitter);
+    }
+
+    buttons.forEach((button) => {
+      button.disabled = true;
+      if (button.tagName === 'BUTTON') {
+        button.dataset.originalText = button.dataset.originalText || button.textContent;
+        button.textContent = 'Procesando...';
+      }
+    });
+  }
+
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !shouldProtectSubmit(form)) {
+      return;
+    }
+
+    if (form.dataset.submitting === '1') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+
   function visibleCalendarDays() {
     return mobileCalendarMedia.matches ? 2 : 7;
   }
@@ -209,6 +247,14 @@ include 'partials/header.php';
     clientMessageText.textContent = message;
     clientMessageModal.classList.add('open');
     clientMessageModal.setAttribute('aria-hidden', 'false');
+  }
+
+  function clearTransientUrlParams() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('mensaje');
+    url.searchParams.delete('error');
+    const cleanSearch = url.searchParams.toString();
+    history.replaceState(null, '', `${url.pathname}${cleanSearch ? `?${cleanSearch}` : ''}${url.hash}`);
   }
 
   function openConfirmReservationModal() {
@@ -554,6 +600,15 @@ include 'partials/header.php';
     });
   });
 
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || event.defaultPrevented || !shouldProtectSubmit(form)) {
+      return;
+    }
+
+    lockSubmitForm(form, event.submitter);
+  });
+
   document.getElementById('prevWeek')?.addEventListener('click', () => {
     const previous = addDays(weekStart, -visibleCalendarDays());
     weekStart = previous < today ? new Date(today) : previous;
@@ -581,6 +636,7 @@ include 'partials/header.php';
 
   renderCourtTabs();
   renderCalendar();
+  clearTransientUrlParams();
 </script>
 
 <?php include 'partials/footer.php'; ?>

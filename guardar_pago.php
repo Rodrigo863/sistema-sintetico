@@ -22,7 +22,7 @@ if ($reservaId <= 0) {
     volverPagoReserva('Selecciona una reserva valida.', $reservaId);
 }
 
-if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
     $metodo = 'efectivo';
 }
 
@@ -121,13 +121,18 @@ $stmt->execute([$reservaId, $monto, $metodo, $concepto]);
 $pagoId = (int)$pdo->lastInsertId();
 
 $totalPagado = $totalPagadoAntes + $monto;
+$pagoCompletaReserva = $totalReserva > 0 && $totalPagado >= $totalReserva;
 
-if ($reserva['estado'] !== 'cancelado' && $totalReserva > 0 && $totalPagado >= $totalReserva) {
+if ($reserva['estado'] !== 'cancelado' && $pagoCompletaReserva) {
     $stmt = $pdo->prepare("UPDATE reservas SET estado = 'finalizado' WHERE id = ?");
     $stmt->execute([$reservaId]);
 }
 
 $pdo->commit();
 
-$_SESSION['pago_ticket_id'] = $pagoId;
-redirigir('index.php#reservas');
+if ($pagoCompletaReserva) {
+    $_SESSION['pago_ticket_id'] = $pagoId;
+    redirigir('index.php?pago_ticket=' . $pagoId . '#reservas');
+}
+
+redirigir('index.php?reserva_detalle=' . $reservaId . '#reservas');

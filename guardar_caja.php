@@ -16,6 +16,28 @@ function volverCaja(string $mensaje, bool $error = true): void
     redirigir('index.php?caja_fecha=' . rawurlencode($fecha) . '&' . $clave . '=' . rawurlencode($mensaje) . '#caja');
 }
 
+function ingresarAbonoPendiente(PDO $pdo, array $abono): void
+{
+    $stmt = $pdo->prepare('INSERT INTO pagos (reserva_id, monto, metodo, concepto, comprobante_path) VALUES (?, ?, ?, ?, ?)');
+    $stmt->execute([
+        (int)$abono['reserva_id'],
+        (float)$abono['monto'],
+        $abono['metodo'],
+        $abono['concepto'],
+        $abono['comprobante_path'],
+    ]);
+
+    $stmt = $pdo->prepare(
+        "UPDATE caja_abonos_pendientes
+         SET estado = 'confirmado', comprobante_confirmado = 1, confirmado_en = NOW()
+         WHERE id = ?"
+    );
+    $stmt->execute([(int)$abono['id']]);
+
+    $stmt = $pdo->prepare("UPDATE reservas SET estado = 'confirmado' WHERE id = ? AND estado <> 'cancelado'");
+    $stmt->execute([(int)$abono['reserva_id']]);
+}
+
 $fecha = $_POST['fecha'] ?? date('Y-m-d');
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) {
     volverCaja('Fecha de caja invalida.');
@@ -58,7 +80,7 @@ $pdo->exec(
       tipo ENUM('ingreso', 'egreso') NOT NULL,
       concepto VARCHAR(120) NOT NULL,
       detalle TEXT DEFAULT NULL,
-      metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'efectivo',
+      metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
       monto DECIMAL(10,2) NOT NULL,
       fecha_movimiento DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -70,7 +92,7 @@ $pdo->exec(
       id INT AUTO_INCREMENT PRIMARY KEY,
       reserva_id INT NOT NULL,
       monto DECIMAL(10,2) NOT NULL,
-      metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'transferencia',
+      metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
       concepto ENUM('sena', 'saldo', 'total', 'extra') NOT NULL DEFAULT 'sena',
       comprobante_path VARCHAR(255) DEFAULT NULL,
       comprobante_confirmado TINYINT(1) NOT NULL DEFAULT 0,
@@ -164,7 +186,7 @@ if ($accion === 'movimiento') {
         $tipoMovimiento = 'egreso';
     }
 
-    if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+    if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
         $metodo = 'efectivo';
     }
 
@@ -231,24 +253,7 @@ if ($accion === 'confirmar_abono') {
         volverCaja('Primero debes confirmar el comprobante antes de ingresar el abono a caja.');
     }
 
-    $stmt = $pdo->prepare('INSERT INTO pagos (reserva_id, monto, metodo, concepto, comprobante_path) VALUES (?, ?, ?, ?, ?)');
-    $stmt->execute([
-        (int)$abono['reserva_id'],
-        (float)$abono['monto'],
-        $abono['metodo'],
-        $abono['concepto'],
-        $abono['comprobante_path'],
-    ]);
-
-    $stmt = $pdo->prepare(
-        "UPDATE caja_abonos_pendientes
-         SET estado = 'confirmado', confirmado_en = NOW()
-         WHERE id = ?"
-    );
-    $stmt->execute([$abonoPendienteId]);
-
-    $stmt = $pdo->prepare("UPDATE reservas SET estado = 'confirmado' WHERE id = ? AND estado <> 'cancelado'");
-    $stmt->execute([(int)$abono['reserva_id']]);
+    ingresarAbonoPendiente($pdo, $abono);
 
     $pdo->commit();
     volverCaja('Abono ingresado a caja correctamente.', false);
@@ -257,37 +262,44 @@ if ($accion === 'confirmar_abono') {
 if ($accion === 'confirmar_comprobante_abono') {
     $abonoPendienteId = (int)($_POST['abono_pendiente_id'] ?? 0);
     $reservaId = (int)($_POST['reserva_id'] ?? 0);
-    $volverDetalle = fn(string $mensaje) => redirigir(
-        'index.php' . (
-            $reservaId > 0
-                ? '?reserva_detalle=' . $reservaId . '&caja_mensaje=' . rawurlencode($mensaje) . '#reservas'
-                : '?caja_mensaje=' . rawurlencode($mensaje) . '#caja'
-        )
-    );
+    $volverDetalle = function (string $mensaje) use (&$reservaId): void {
+        redirigir(
+            'index.php' . (
+                $reservaId > 0
+                    ? '?reserva_detalle=' . $reservaId . '&caja_mensaje=' . rawurlencode($mensaje) . '#reservas'
+                    : '?caja_mensaje=' . rawurlencode($mensaje) . '#reservas'
+            )
+        );
+    };
 
     if ($abonoPendienteId <= 0) {
         $pdo->commit();
         $volverDetalle('El comprobante ya fue confirmado.');
     }
 
-    $stmt = $pdo->prepare("SELECT id, estado FROM caja_abonos_pendientes WHERE id = ? FOR UPDATE");
+    $stmt = $pdo->prepare("SELECT * FROM caja_abonos_pendientes WHERE id = ? FOR UPDATE");
     $stmt->execute([$abonoPendienteId]);
     $abono = $stmt->fetch();
     if (!$abono) {
         $pdo->commit();
         $volverDetalle('El comprobante ya fue confirmado.');
     }
+    $reservaId = (int)($abono['reserva_id'] ?? $reservaId);
 
     if ($abono['estado'] !== 'revision') {
         $pdo->commit();
         $volverDetalle('El comprobante ya fue confirmado.');
     }
 
-    $stmt = $pdo->prepare("UPDATE caja_abonos_pendientes SET estado = 'pendiente', comprobante_confirmado = 1 WHERE id = ?");
-    $stmt->execute([$abonoPendienteId]);
+    if (empty($abono['comprobante_path'])) {
+        $pdo->rollBack();
+        $volverDetalle('Este abono no tiene comprobante para confirmar.');
+    }
+
+    ingresarAbonoPendiente($pdo, $abono);
     $pdo->commit();
 
-    $volverDetalle('Comprobante confirmado. El abono quedo pendiente en caja.');
+    $volverDetalle('Comprobante confirmado. Abono registrado y reserva confirmada.');
 }
 
 $pdo->rollBack();

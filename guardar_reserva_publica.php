@@ -85,7 +85,7 @@ if ($montoPago > 0 && $montoPago < 20000) {
     volverReservaPublica('El abono minimo es 20.000.');
 }
 
-if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
     $metodo = 'efectivo';
 }
 
@@ -112,7 +112,7 @@ $pdo->exec(
       id INT AUTO_INCREMENT PRIMARY KEY,
       reserva_id INT NOT NULL,
       monto DECIMAL(10,2) NOT NULL,
-      metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'transferencia',
+      metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
       concepto ENUM('sena', 'saldo', 'total', 'extra') NOT NULL DEFAULT 'sena',
       comprobante_path VARCHAR(255) DEFAULT NULL,
       comprobante_confirmado TINYINT(1) NOT NULL DEFAULT 0,

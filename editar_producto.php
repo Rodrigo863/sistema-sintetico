@@ -8,6 +8,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $productoId = (int)($_POST['producto_id'] ?? 0);
 $nombre = trim($_POST['nombre'] ?? '');
 $codigoBarra = trim($_POST['codigo_barra'] ?? '');
+$proveedorId = (int)($_POST['proveedor_id'] ?? 0);
 $categoria = trim($_POST['categoria'] ?? '');
 $precioCompra = leerMonto($_POST['precio_compra'] ?? 0);
 $precioVenta = leerMonto($_POST['precio_venta'] ?? 0);
@@ -38,6 +39,7 @@ if ($precioCompra < 0 || $precioVenta < 0 || $packCantidad < 0 || $precioPack < 
 }
 
 $pdo = conectarDB();
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFTER categoria");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -48,6 +50,14 @@ $pdo->exec(
       UNIQUE KEY uq_producto_categorias_nombre (nombre)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
+
+if ($proveedorId > 0) {
+    $stmt = $pdo->prepare('SELECT id FROM proveedores WHERE id = ?');
+    $stmt->execute([$proveedorId]);
+    if (!$stmt->fetch()) {
+        volverProducto('Proveedor no encontrado.');
+    }
+}
 
 $stmt = $pdo->prepare('SELECT id FROM productos WHERE id = ?');
 $stmt->execute([$productoId]);
@@ -84,12 +94,13 @@ if ($categoria !== '') {
 
 $stmt = $pdo->prepare(
     'UPDATE productos
-     SET nombre = ?, codigo_barra = ?, categoria = ?, precio_compra = ?, precio_venta = ?, pack_cantidad = ?, precio_pack = ?, stock = ?, estado = ?
+     SET nombre = ?, codigo_barra = ?, proveedor_id = ?, categoria = ?, precio_compra = ?, precio_venta = ?, pack_cantidad = ?, precio_pack = ?, stock = ?, estado = ?
      WHERE id = ?'
 );
 $stmt->execute([
     $nombre,
     $codigoBarra ?: null,
+    $proveedorId > 0 ? $proveedorId : null,
     $categoria ?: null,
     $precioCompra,
     $precioVenta,

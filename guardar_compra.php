@@ -14,6 +14,7 @@ $productoIds = $_POST['producto_id'] ?? [];
 $tiposCompra = $_POST['tipo_compra'] ?? [];
 $cantidades = $_POST['cantidad'] ?? [];
 $precios = $_POST['precio_unitario'] ?? [];
+$stockYaCargado = $_POST['stock_ya_cargado'] ?? [];
 
 if (!is_array($productoIds)) {
     $productoIds = [$productoIds];
@@ -27,12 +28,15 @@ if (!is_array($cantidades)) {
 if (!is_array($precios)) {
     $precios = [$precios];
 }
+if (!is_array($stockYaCargado)) {
+    $stockYaCargado = [$stockYaCargado];
+}
 
 $proveedorId = (int)($_POST['proveedor_id'] ?? 0);
 $metodo = $_POST['metodo'] ?? 'efectivo';
 $observacion = trim($_POST['observacion'] ?? '');
 
-if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
     $metodo = 'efectivo';
 }
 
@@ -42,6 +46,7 @@ foreach ($productoIds as $index => $productoIdRaw) {
     $cantidad = (int)($cantidades[$index] ?? 0);
     $tipoCompra = $tiposCompra[$index] ?? 'unidad';
     $precio = leerMonto($precios[$index] ?? 0);
+    $stockCargado = (int)($stockYaCargado[$index] ?? 0) === 1;
 
     if ($productoId <= 0 && $cantidad <= 0) {
         continue;
@@ -60,6 +65,7 @@ foreach ($productoIds as $index => $productoIdRaw) {
         'tipo_compra' => $tipoCompra,
         'cantidad' => $cantidad,
         'precio_unitario' => $precio,
+        'stock_ya_cargado' => $stockCargado,
     ];
 }
 
@@ -123,6 +129,7 @@ foreach ($lineas as $linea) {
         'unidades_agregadas' => $unidadesAgregadas,
         'precio_unitario' => $linea['precio_unitario'],
         'subtotal' => $subtotal,
+        'stock_ya_cargado' => $linea['stock_ya_cargado'],
     ];
 }
 
@@ -153,6 +160,10 @@ foreach ($detalles as $detalle) {
 
 $stmtStock = $pdo->prepare('UPDATE productos SET stock = stock + ?, precio_compra = ? WHERE id = ?');
 foreach ($detalles as $detalle) {
+    if ($detalle['stock_ya_cargado']) {
+        continue;
+    }
+
     $precioReferencia = $detalle['tipo_compra'] === 'pack' && $detalle['unidades_agregadas'] > 0
         ? $detalle['subtotal'] / $detalle['unidades_agregadas']
         : $detalle['precio_unitario'];

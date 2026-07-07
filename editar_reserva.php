@@ -1,9 +1,10 @@
 <?php
 require 'config.php';
 
-function volverConErrorReserva(string $mensaje): void
+function volverConErrorReserva(string $mensaje, int $reservaId = 0): void
 {
-    redirigir('index.php?reserva_error=' . urlencode($mensaje) . '#reservas');
+    $detalle = $reservaId > 0 ? '&reserva_detalle=' . $reservaId : '';
+    redirigir('index.php?reserva_error=' . urlencode($mensaje) . $detalle . '#reservas');
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -74,6 +75,11 @@ $totalPagado = (float)$totales['total_pagado'];
 
 if ($estado === 'finalizado' && $totalReserva > 0 && $totalPagado < $totalReserva) {
     $estado = $totalPagado > 0 ? 'confirmado' : 'reservado';
+}
+
+if ($estado === 'cancelado' && $totalPagado > 0) {
+    $pdo->rollBack();
+    volverConErrorReserva('No se puede cancelar una reserva que ya tiene pagos registrados.', $reservaId);
 }
 
 $stmt = $pdo->prepare(

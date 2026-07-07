@@ -156,7 +156,7 @@ $tituloRango = date('d/m/Y', strtotime($reporteDesde)) . ' al ' . date('d/m/Y', 
 
     <section class="summary">
       <div class="card"><span>Total ventas</span><strong><?= formatearGuaranies($resumenVentas['total_ventas'] ?? 0) ?></strong><small><?= (int)($resumenVentas['cantidad_ventas'] ?? 0) ?> venta(s)</small></div>
-      <div class="card"><span>Costo ventas</span><strong><?= formatearGuaranies($costoVentas) ?></strong><small>Costo unitario por unidades</small></div>
+      <div class="card"><span>Costo ventas</span><strong><?= formatearGuaranies($costoVentas) ?></strong><small>Costo total vendido</small></div>
       <div class="card"><span>Ganancia ventas</span><strong><?= formatearGuaranies($gananciaVentas) ?></strong><small>Venta menos costo</small></div>
       <div class="card"><span>Ingresos reservas</span><strong><?= formatearGuaranies($totalPagosReservas) ?></strong><small><?= $reservasCobradas ?> reserva(s), <?= count($pagosDetalle) ?> pago(s)</small></div>
     </section>
@@ -168,12 +168,12 @@ $tituloRango = date('d/m/Y', strtotime($reporteDesde)) . ' al ' . date('d/m/Y', 
         <tr>
           <th>Fecha</th><th>Venta</th><th>Cliente / reserva</th><th>Producto</th><th>Tipo</th>
           <th class="num">Cant.</th><th class="num">Unid.</th><th class="num">P. venta</th>
-          <th class="num">Subtotal</th><th class="num">Costo unit.</th><th class="num">Costo</th><th class="num">Ganancia</th>
+          <th class="num">Subtotal</th><th class="num">Costo total</th><th class="num">Ganancia</th>
         </tr>
       </thead>
       <tbody>
         <?php if (empty($ventasDetalle)): ?>
-          <tr><td colspan="12">Sin ventas en el rango seleccionado.</td></tr>
+          <tr><td colspan="11">Sin ventas en el rango seleccionado.</td></tr>
         <?php else: ?>
           <?php foreach ($ventasDetalle as $fila): ?>
             <?php $ganancia = (float)$fila['ganancia']; ?>
@@ -190,7 +190,6 @@ $tituloRango = date('d/m/Y', strtotime($reporteDesde)) . ' al ' . date('d/m/Y', 
               <td class="num"><?= (int)$fila['unidades_descontadas'] ?></td>
               <td class="num"><?= formatearGuaranies($fila['precio_unitario']) ?></td>
               <td class="num"><?= formatearGuaranies($fila['subtotal']) ?></td>
-              <td class="num"><?= formatearGuaranies($fila['costo_unitario']) ?></td>
               <td class="num"><?= formatearGuaranies($fila['costo_total']) ?></td>
               <td class="num <?= $ganancia < 0 ? 'negative' : 'positive' ?>"><?= formatearGuaranies($ganancia) ?></td>
             </tr>

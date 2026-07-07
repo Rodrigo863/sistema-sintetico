@@ -35,12 +35,13 @@ $pdo->exec(
       actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFTER categoria");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS compras (
       id INT AUTO_INCREMENT PRIMARY KEY,
       proveedor_id INT DEFAULT NULL,
       total DECIMAL(10,2) NOT NULL DEFAULT 0,
-      metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'efectivo',
+      metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
       estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa',
       fecha_compra DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       observacion TEXT DEFAULT NULL,
@@ -94,7 +95,7 @@ $pdo->exec(
       tipo ENUM('ingreso', 'egreso') NOT NULL,
       concepto VARCHAR(120) NOT NULL,
       detalle TEXT DEFAULT NULL,
-      metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'efectivo',
+      metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
       monto DECIMAL(10,2) NOT NULL,
       fecha_movimiento DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -106,7 +107,7 @@ $pdo->exec(
       id INT AUTO_INCREMENT PRIMARY KEY,
       reserva_id INT NOT NULL,
       monto DECIMAL(10,2) NOT NULL,
-      metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'transferencia',
+      metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
       concepto ENUM('sena', 'saldo', 'total', 'extra') NOT NULL DEFAULT 'sena',
       comprobante_path VARCHAR(255) DEFAULT NULL,
       comprobante_confirmado TINYINT(1) NOT NULL DEFAULT 0,
@@ -134,7 +135,12 @@ $clientes = $pdo->query("SELECT * FROM clientes WHERE estado = 'activo' ORDER BY
 $todosClientes = $pdo->query("SELECT * FROM clientes ORDER BY nombre")->fetchAll();
 $proveedores = $pdo->query("SELECT * FROM proveedores ORDER BY nombre")->fetchAll();
 $canchas = $pdo->query("SELECT * FROM canchas ORDER BY nombre")->fetchAll();
-$productos = $pdo->query("SELECT * FROM productos ORDER BY nombre")->fetchAll();
+$productos = $pdo->query(
+    "SELECT p.*, pv.nombre AS proveedor
+     FROM productos p
+     LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
+     ORDER BY p.nombre"
+)->fetchAll();
 $categorias = $pdo->query("SELECT * FROM producto_categorias ORDER BY estado ASC, nombre ASC")->fetchAll();
 $categoriasActivas = array_values(array_filter($categorias, fn($categoria) => $categoria['estado'] === 'activo'));
 $usuariosSistema = $pdo->query("SELECT id, nombre, usuario, rol, estado, ultimo_acceso, creado_en FROM usuarios ORDER BY estado ASC, nombre ASC")->fetchAll();
@@ -149,16 +155,22 @@ $productoParams = [];
 
 if ($productoBuscar !== '') {
     $productoWhere = "WHERE (
-        nombre LIKE ?
-        OR codigo_barra LIKE ?
-        OR categoria LIKE ?
-        OR estado LIKE ?
+        p.nombre LIKE ?
+        OR p.codigo_barra LIKE ?
+        OR p.categoria LIKE ?
+        OR pv.nombre LIKE ?
+        OR p.estado LIKE ?
     )";
     $productoLike = '%' . $productoBuscar . '%';
-    $productoParams = [$productoLike, $productoLike, $productoLike, $productoLike];
+    $productoParams = [$productoLike, $productoLike, $productoLike, $productoLike, $productoLike];
 }
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM productos $productoWhere");
+$stmt = $pdo->prepare(
+    "SELECT COUNT(*)
+     FROM productos p
+     LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
+     $productoWhere"
+);
 $stmt->execute($productoParams);
 $productosTotal = (int)$stmt->fetchColumn();
 $productosPaginas = max(1, (int)ceil($productosTotal / $productosPorPagina));
@@ -166,10 +178,11 @@ $productoPagina = min($productoPagina, $productosPaginas);
 $productosOffset = ($productoPagina - 1) * $productosPorPagina;
 
 $stmt = $pdo->prepare(
-    "SELECT *
-     FROM productos
+    "SELECT p.*, pv.nombre AS proveedor
+     FROM productos p
+     LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
      $productoWhere
-     ORDER BY nombre
+     ORDER BY p.nombre
      LIMIT $productosPorPagina OFFSET $productosOffset"
 );
 $stmt->execute($productoParams);
@@ -239,6 +252,26 @@ $reservas = $pdo->query(
      WHERE r.fecha >= CURDATE()
      ORDER BY r.fecha ASC, r.hora_inicio ASC"
 )->fetchAll();
+
+$consumosReservas = [];
+$reservaIds = array_map('intval', array_column($reservas, 'id'));
+if (!empty($reservaIds)) {
+    $reservaPlaceholders = implode(',', array_fill(0, count($reservaIds), '?'));
+    $stmt = $pdo->prepare(
+        "SELECT v.reserva_id, v.id AS venta_id, v.fecha_venta, v.metodo, v.observacion,
+                p.nombre AS producto, vd.tipo_venta, vd.cantidad, vd.precio_unitario, vd.subtotal
+         FROM ventas v
+         INNER JOIN venta_detalles vd ON vd.venta_id = v.id
+         INNER JOIN productos p ON p.id = vd.producto_id
+         WHERE v.reserva_id IN ($reservaPlaceholders)
+           AND v.estado <> 'anulada'
+         ORDER BY v.fecha_venta ASC, v.id ASC, vd.id ASC"
+    );
+    $stmt->execute($reservaIds);
+    foreach ($stmt->fetchAll() as $consumoReserva) {
+        $consumosReservas[(int)$consumoReserva['reserva_id']][] = $consumoReserva;
+    }
+}
 
 $pagos = $pdo->query(
     "SELECT p.*, r.fecha, r.hora_inicio, c.nombre AS cliente, ca.nombre AS cancha
@@ -483,17 +516,13 @@ $stmt = $pdo->prepare("SELECT COALESCE(SUM(total), 0) FROM ventas WHERE fecha_ve
 $stmt->execute([$cajaInicio, $cajaFin]);
 $cajaVentasDirectas = (float)$stmt->fetchColumn();
 
-$stmt = $pdo->prepare("SELECT COALESCE(SUM(total), 0) FROM compras WHERE fecha_compra BETWEEN ? AND ? AND estado <> 'anulada'");
-$stmt->execute([$cajaInicio, $cajaFin]);
-$cajaCompras = (float)$stmt->fetchColumn();
-
 $stmt = $pdo->prepare("SELECT COALESCE(SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END), 0) FROM caja_movimientos WHERE caja_jornada_id = ?");
 $stmt->execute([$cajaJornadaId]);
 $cajaMovimientosManualesTotal = (float)$stmt->fetchColumn();
 
 $cajaMontoInicial = (float)($cajaJornada['monto_inicial'] ?? 0);
 $cajaIngresos = $cajaPagos + $cajaVentasDirectas;
-$cajaSaldo = $cajaMontoInicial + $cajaIngresos - $cajaCompras + $cajaMovimientosManualesTotal;
+$cajaSaldo = $cajaMontoInicial + $cajaIngresos + $cajaMovimientosManualesTotal;
 
 $stmt = $pdo->prepare(
     "SELECT metodo, SUM(monto) AS total
@@ -506,17 +535,13 @@ $stmt = $pdo->prepare(
        FROM ventas v
        WHERE v.fecha_venta BETWEEN ? AND ? AND v.estado <> 'anulada' AND v.reserva_id IS NULL
        UNION ALL
-       SELECT c.metodo, -c.total AS monto
-       FROM compras c
-       WHERE c.fecha_compra BETWEEN ? AND ? AND c.estado <> 'anulada'
-       UNION ALL
        SELECT cm.metodo, CASE WHEN cm.tipo = 'ingreso' THEN cm.monto ELSE -cm.monto END AS monto
        FROM caja_movimientos cm
        WHERE cm.caja_jornada_id = ?
      ) caja_metodos
      GROUP BY metodo"
 );
-$stmt->execute([$cajaInicio, $cajaFin, $cajaInicio, $cajaFin, $cajaInicio, $cajaFin, $cajaJornadaId]);
+$stmt->execute([$cajaInicio, $cajaFin, $cajaInicio, $cajaFin, $cajaJornadaId]);
 $cajaPorMetodo = array_fill_keys(['efectivo', 'transferencia', 'tarjeta', 'otro'], 0.0);
 foreach ($stmt->fetchAll() as $metodoCaja) {
     $cajaPorMetodo[$metodoCaja['metodo']] = (float)$metodoCaja['total'];
@@ -535,25 +560,20 @@ $stmt = $pdo->prepare(
      FROM caja_jornadas cj
      WHERE cj.id = ?
      UNION ALL
-     SELECT 'ingreso' AS tipo, 'Pago reserva' AS concepto, p.fecha_pago AS fecha, p.monto AS monto,
+     SELECT 'ingreso' AS tipo, 'Pago reserva' AS concepto, MAX(p.fecha_pago) AS fecha, SUM(p.monto) AS monto,
             p.metodo, CONCAT('Reserva #', r.id, ' - ', c.nombre, ' - ', ca.nombre) AS detalle
      FROM pagos p
      INNER JOIN reservas r ON r.id = p.reserva_id
      INNER JOIN clientes c ON c.id = r.cliente_id
      INNER JOIN canchas ca ON ca.id = r.cancha_id
      WHERE p.fecha_pago BETWEEN ? AND ?
+     GROUP BY r.id, c.nombre, ca.nombre, p.metodo
      UNION ALL
      SELECT 'ingreso' AS tipo, CONCAT('Venta directa #', v.id) AS concepto, v.fecha_venta AS fecha, v.total AS monto,
             v.metodo, COALESCE(cl.nombre, 'Sin cliente') AS detalle
      FROM ventas v
      LEFT JOIN clientes cl ON cl.id = v.cliente_id
      WHERE v.fecha_venta BETWEEN ? AND ? AND v.estado <> 'anulada' AND v.reserva_id IS NULL
-     UNION ALL
-     SELECT 'egreso' AS tipo, CONCAT('Compra #', c.id) AS concepto, c.fecha_compra AS fecha, c.total AS monto,
-            c.metodo, COALESCE(pv.nombre, 'Sin proveedor') AS detalle
-     FROM compras c
-     LEFT JOIN proveedores pv ON pv.id = c.proveedor_id
-     WHERE c.fecha_compra BETWEEN ? AND ? AND c.estado <> 'anulada'
      UNION ALL
      SELECT cm.tipo, cm.concepto, cm.fecha_movimiento AS fecha, cm.monto,
             cm.metodo, COALESCE(cm.detalle, 'Movimiento manual') AS detalle
@@ -567,7 +587,7 @@ $stmt = $pdo->prepare(
      WHERE cj.id = ? AND cj.estado = 'cerrada'
      ORDER BY fecha DESC"
 );
-$stmt->execute([$cajaJornadaId, $cajaInicio, $cajaFin, $cajaInicio, $cajaFin, $cajaInicio, $cajaFin, $cajaJornadaId, $cajaJornadaId]);
+$stmt->execute([$cajaJornadaId, $cajaInicio, $cajaFin, $cajaInicio, $cajaFin, $cajaJornadaId, $cajaJornadaId]);
 $cajaMovimientos = $stmt->fetchAll();
 $cajaMovimientosDetalle = array_values(array_filter($cajaMovimientos, fn($movimiento) => in_array($movimiento['tipo'], ['ingreso', 'egreso'], true)));
 
@@ -586,7 +606,6 @@ $stmtTotalesCierre = $pdo->prepare(
     "SELECT
         COALESCE((SELECT SUM(monto) FROM pagos WHERE fecha_pago BETWEEN ? AND ?), 0) AS pagos,
         COALESCE((SELECT SUM(total) FROM ventas WHERE fecha_venta BETWEEN ? AND ? AND estado <> 'anulada' AND reserva_id IS NULL), 0) AS ventas,
-        COALESCE((SELECT SUM(total) FROM compras WHERE fecha_compra BETWEEN ? AND ? AND estado <> 'anulada'), 0) AS compras,
         COALESCE((SELECT SUM(CASE WHEN tipo = 'ingreso' THEN monto ELSE -monto END) FROM caja_movimientos WHERE caja_jornada_id = ?), 0) AS manuales"
 );
 $stmtMetodosCierre = $pdo->prepare(
@@ -599,10 +618,6 @@ $stmtMetodosCierre = $pdo->prepare(
        SELECT v.metodo, v.total AS monto
        FROM ventas v
        WHERE v.fecha_venta BETWEEN ? AND ? AND v.estado <> 'anulada' AND v.reserva_id IS NULL
-       UNION ALL
-       SELECT c.metodo, -c.total AS monto
-       FROM compras c
-       WHERE c.fecha_compra BETWEEN ? AND ? AND c.estado <> 'anulada'
        UNION ALL
        SELECT cm.metodo, CASE WHEN cm.tipo = 'ingreso' THEN cm.monto ELSE -cm.monto END AS monto
        FROM caja_movimientos cm
@@ -625,12 +640,6 @@ $stmtMovimientosCierre = $pdo->prepare(
      LEFT JOIN clientes cl ON cl.id = v.cliente_id
      WHERE v.fecha_venta BETWEEN ? AND ? AND v.estado <> 'anulada' AND v.reserva_id IS NULL
      UNION ALL
-     SELECT 'egreso' AS tipo, CONCAT('Compra #', c.id) AS concepto, c.fecha_compra AS fecha, c.total AS monto,
-            c.metodo, COALESCE(pv.nombre, 'Sin proveedor') AS detalle
-     FROM compras c
-     LEFT JOIN proveedores pv ON pv.id = c.proveedor_id
-     WHERE c.fecha_compra BETWEEN ? AND ? AND c.estado <> 'anulada'
-     UNION ALL
      SELECT cm.tipo, cm.concepto, cm.fecha_movimiento AS fecha, cm.monto,
             cm.metodo, COALESCE(cm.detalle, 'Movimiento manual') AS detalle
      FROM caja_movimientos cm
@@ -641,19 +650,19 @@ $stmtMovimientosCierre = $pdo->prepare(
 foreach ($cajaCierresRecientes as $cierre) {
     $inicioCierre = $cierre['abierta_en'];
     $finCierre = $cierre['cerrada_en'];
-    $stmtTotalesCierre->execute([$inicioCierre, $finCierre, $inicioCierre, $finCierre, $inicioCierre, $finCierre, (int)$cierre['id']]);
+    $stmtTotalesCierre->execute([$inicioCierre, $finCierre, $inicioCierre, $finCierre, (int)$cierre['id']]);
     $totalesCierre = $stmtTotalesCierre->fetch();
 
     $porMetodoCierre = array_fill_keys(['efectivo', 'transferencia', 'tarjeta', 'otro'], 0.0);
-    $stmtMetodosCierre->execute([$inicioCierre, $finCierre, $inicioCierre, $finCierre, $inicioCierre, $finCierre, (int)$cierre['id']]);
+    $stmtMetodosCierre->execute([$inicioCierre, $finCierre, $inicioCierre, $finCierre, (int)$cierre['id']]);
     foreach ($stmtMetodosCierre->fetchAll() as $metodoCierre) {
         $porMetodoCierre[$metodoCierre['metodo']] = (float)$metodoCierre['total'];
     }
 
-    $stmtMovimientosCierre->execute([$inicioCierre, $finCierre, $inicioCierre, $finCierre, $inicioCierre, $finCierre, (int)$cierre['id']]);
+    $stmtMovimientosCierre->execute([$inicioCierre, $finCierre, $inicioCierre, $finCierre, (int)$cierre['id']]);
     $esperadoEfectivo = (float)$cierre['monto_inicial'] + $porMetodoCierre['efectivo'];
     $esperadoTransferencia = $porMetodoCierre['transferencia'];
-    $esperadoTotal = (float)$cierre['monto_inicial'] + (float)$totalesCierre['pagos'] + (float)$totalesCierre['ventas'] - (float)$totalesCierre['compras'] + (float)$totalesCierre['manuales'];
+    $esperadoTotal = (float)$cierre['monto_inicial'] + (float)$totalesCierre['pagos'] + (float)$totalesCierre['ventas'] + (float)$totalesCierre['manuales'];
     $contadoEfectivo = (float)$cierre['monto_cierre_efectivo'];
     $contadoTransferencia = (float)$cierre['monto_cierre_transferencia'];
 
@@ -776,11 +785,11 @@ $ventaForm = [
     'producto_id' => (int)($_GET['venta_producto_id'] ?? 0),
     'tipo_venta' => in_array($ventaTipo, ['unidad', 'pack'], true) ? $ventaTipo : 'unidad',
     'cantidad' => max(0, (int)($_GET['venta_cantidad'] ?? 1)),
-    'metodo' => in_array($ventaMetodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true) ? $ventaMetodo : 'efectivo',
+    'metodo' => in_array($ventaMetodo, ['efectivo', 'transferencia'], true) ? $ventaMetodo : 'efectivo',
     'observacion' => trim($_GET['venta_observacion'] ?? ''),
 ];
 $pagoTicket = null;
-$pagoTicketId = (int)($_SESSION['pago_ticket_id'] ?? 0);
+$pagoTicketId = (int)($_GET['pago_ticket'] ?? ($_SESSION['pago_ticket_id'] ?? 0));
 unset($_SESSION['pago_ticket_id']);
 $reservaDetalleId = (int)($_GET['reserva_detalle'] ?? 0);
 $reservasConComprobantePendiente = array_filter($reservas, static function (array $reserva): bool {
@@ -827,46 +836,24 @@ if ($pagoTicketId > 0) {
     $pagoTicket = $stmt->fetch();
 }
 
+$useAppLoading = true;
 include 'partials/header.php';
 ?>
 
 <main class="container">
   <nav class="module-menu" aria-label="Modulos del sistema">
-    <button type="button" class="active" data-target="dashboard">Dashboard</button>
-    <button type="button" data-target="caja">Caja</button>
-    <button type="button" data-target="clientes">Clientes</button>
-    <button type="button" data-target="proveedores">Proveedores</button>
-    <button type="button" data-target="canchas">Canchas</button>
-    <button type="button" data-target="reservas" class="<?= !empty($reservasConComprobantePendiente) ? 'has-notification' : '' ?>">Reservas</button>
-    <button type="button" data-target="pagos">Pagos</button>
-    <button type="button" data-target="categorias">Categor&iacute;as</button>
-    <button type="button" data-target="productos">Productos</button>
-    <button type="button" data-target="compras">Compras</button>
-    <button type="button" data-target="ventas">Ventas</button>
-    <button type="button" data-target="reportes">Reportes</button>
-    <button type="button" data-target="configuracion">Configuraci&oacute;n</button>
+    <button type="button" class="active" data-target="caja"><span class="menu-icon" aria-hidden="true">$</span><span>Caja</span></button>
+    <button type="button" data-target="clientes"><span class="menu-icon" aria-hidden="true">◉</span><span>Clientes</span></button>
+    <button type="button" data-target="proveedores"><span class="menu-icon" aria-hidden="true">▤</span><span>Proveedores</span></button>
+    <button type="button" data-target="canchas"><span class="menu-icon" aria-hidden="true">▣</span><span>Canchas</span></button>
+    <button type="button" data-target="reservas" class="<?= !empty($reservasConComprobantePendiente) ? 'has-notification' : '' ?>"><span class="menu-icon" aria-hidden="true">◷</span><span>Reservas</span></button>
+    <button type="button" data-target="categorias"><span class="menu-icon" aria-hidden="true">◇</span><span>Categor&iacute;as</span></button>
+    <button type="button" data-target="productos"><span class="menu-icon" aria-hidden="true">□</span><span>Productos</span></button>
+    <button type="button" data-target="compras"><span class="menu-icon" aria-hidden="true">↓</span><span>Compras</span></button>
+    <button type="button" data-target="ventas"><span class="menu-icon" aria-hidden="true">↑</span><span>Ventas</span></button>
+    <button type="button" data-target="reportes"><span class="menu-icon" aria-hidden="true">▥</span><span>Reportes</span></button>
+    <button type="button" data-target="configuracion"><span class="menu-icon" aria-hidden="true">⚙</span><span>Configuraci&oacute;n</span></button>
   </nav>
-
-  <section class="module active" id="dashboard">
-    <div class="stats">
-      <article class="stat">
-        <span>Reservas hoy</span>
-        <strong><?= $totalReservasHoy ?></strong>
-      </article>
-      <article class="stat">
-        <span>Ingresos hoy</span>
-        <strong><?= formatearGuaranies($ingresosHoy) ?></strong>
-      </article>
-      <article class="stat">
-        <span>Ventas hoy</span>
-        <strong><?= formatearGuaranies($ventasHoy) ?></strong>
-      </article>
-      <article class="stat">
-        <span>Saldo pendiente</span>
-        <strong><?= formatearGuaranies($saldoPendiente) ?></strong>
-      </article>
-    </div>
-  </section>
 
   <section class="module" id="reportes">
     <article class="panel">
@@ -943,7 +930,7 @@ include 'partials/header.php';
     </article>
   </section>
 
-  <section class="module" id="caja">
+  <section class="module active" id="caja">
     <article class="panel">
       <div class="section-header">
         <div>
@@ -1166,7 +1153,10 @@ include 'partials/header.php';
     <article class="panel">
       <div class="section-header">
         <h2>Listado de clientes</h2>
-        <span class="muted"><?= count($todosClientes) ?> registrados</span>
+        <div class="search-form">
+          <input type="search" id="clientListSearch" placeholder="Buscar cliente, telefono, email...">
+          <span class="muted" id="clientListCount"><?= count($todosClientes) ?> registrado(s)</span>
+        </div>
       </div>
       <table>
         <thead><tr><th>Nombre</th><th>Tel&eacute;fono</th><th>Email</th><th>Estado</th><th>Acciones</th></tr></thead>
@@ -1175,7 +1165,7 @@ include 'partials/header.php';
             <tr><td colspan="5">Todav&iacute;a no hay clientes.</td></tr>
           <?php else: ?>
             <?php foreach ($todosClientes as $cliente): ?>
-              <tr>
+              <tr data-client-row data-client-search="<?= e(strtolower(trim(($cliente['nombre'] ?? '') . ' ' . ($cliente['telefono'] ?? '') . ' ' . ($cliente['email'] ?? '') . ' ' . ($cliente['documento'] ?? '') . ' ' . ($cliente['estado'] ?? '')))) ?>">
                 <td><?= e($cliente['nombre']) ?></td>
                 <td><?= e($cliente['telefono']) ?></td>
                 <td><?= e($cliente['email'] ?: '-') ?></td>
@@ -1183,9 +1173,11 @@ include 'partials/header.php';
                 <td><a class="btn small secondary" href="editar_cliente.php?id=<?= (int)$cliente['id'] ?>">Editar</a></td>
               </tr>
             <?php endforeach; ?>
+            <tr data-client-empty hidden><td colspan="5">No se encontraron clientes.</td></tr>
           <?php endif; ?>
         </tbody>
       </table>
+      <nav class="pagination" id="clientListPagination" aria-label="Paginacion de clientes"></nav>
     </article>
   </section>
 
@@ -1244,6 +1236,7 @@ include 'partials/header.php';
           <?php endif; ?>
         </tbody>
       </table>
+      <nav class="pagination" id="providerListPagination" aria-label="Paginacion de proveedores"></nav>
     </article>
   </section>
 
@@ -1356,7 +1349,10 @@ include 'partials/header.php';
     <article class="panel">
       <div class="section-header">
         <h2>Listado de categor&iacute;as</h2>
-        <span class="muted"><?= count($categorias) ?> categor&iacute;a(s)</span>
+        <div class="search-form">
+          <input type="search" id="categoryListSearch" placeholder="Buscar categor&iacute;a, estado...">
+          <span class="muted" id="categoryListCount"><?= count($categorias) ?> categor&iacute;a(s)</span>
+        </div>
       </div>
       <table>
         <thead><tr><th>Nombre</th><th>Estado</th><th>Acciones</th></tr></thead>
@@ -1365,7 +1361,7 @@ include 'partials/header.php';
             <tr><td colspan="3">Todav&iacute;a no hay categor&iacute;as cargadas.</td></tr>
           <?php else: ?>
             <?php foreach ($categorias as $categoria): ?>
-              <tr>
+              <tr data-category-row data-category-search="<?= e(strtolower(trim(($categoria['nombre'] ?? '') . ' ' . ($categoria['estado'] ?? '')))) ?>">
                 <td><?= e($categoria['nombre']) ?></td>
                 <td><span class="badge <?= e($categoria['estado']) ?>"><?= e($categoria['estado']) ?></span></td>
                 <td>
@@ -1393,9 +1389,11 @@ include 'partials/header.php';
                 </td>
               </tr>
             <?php endforeach; ?>
+            <tr data-category-empty hidden><td colspan="3">No se encontraron categor&iacute;as.</td></tr>
           <?php endif; ?>
         </tbody>
       </table>
+      <nav class="pagination" id="categoryListPagination" aria-label="Paginacion de categorias"></nav>
     </article>
   </section>
 
@@ -1405,6 +1403,14 @@ include 'partials/header.php';
       <form action="guardar_producto.php" method="post" class="grid compact">
         <label>Nombre <input type="text" name="nombre" placeholder="Agua mineral" required></label>
         <label>C&oacute;digo de barras <input type="text" name="codigo_barra" placeholder="Escanear o escribir"></label>
+        <div class="client-picker">
+          <label>Proveedor
+            <input type="hidden" name="proveedor_id" id="productProviderId">
+            <input type="search" id="productProviderSearch" autocomplete="off" placeholder="Sin proveedor">
+          </label>
+          <button type="button" class="add-client-button" data-open-quick-provider="product" title="Agregar proveedor">+</button>
+          <div class="autocomplete-list" id="productProviderSuggestions"></div>
+        </div>
         <div class="category-picker">
           <label>Categor&iacute;a <input type="text" name="categoria" id="productoCategoria" autocomplete="off" placeholder="Bebidas"></label>
           <button type="button" class="add-client-button" data-add-category="productoCategoria" title="Agregar categor&iacute;a">+</button>
@@ -1426,7 +1432,7 @@ include 'partials/header.php';
           <span class="muted" id="productInventoryCount"><?= $productosTotal ?> producto(s)<?= $productoBuscar !== '' ? ' encontrados' : '' ?></span>
         </div>
         <form action="index.php#productos-list" method="get" class="search-form" id="productSearchForm">
-          <input type="search" name="producto_buscar" id="productInventorySearch" value="<?= e($productoBuscar) ?>" placeholder="Buscar producto, c&oacute;digo, categor&iacute;a...">
+          <input type="search" name="producto_buscar" id="productInventorySearch" value="<?= e($productoBuscar) ?>" placeholder="Buscar producto, proveedor, c&oacute;digo...">
           <button type="submit">Buscar</button>
           <?php if ($productoBuscar !== ''): ?>
             <a class="btn secondary" href="index.php#productos-list">Limpiar</a>
@@ -1434,15 +1440,16 @@ include 'partials/header.php';
         </form>
       </div>
       <table>
-        <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Unidad</th><th>Pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
+        <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Unidad</th><th>Pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
         <tbody id="productInventoryRows">
           <?php if (empty($productosInventario)): ?>
-            <tr><td colspan="9">Todav&iacute;a no hay productos cargados.</td></tr>
+            <tr><td colspan="10">Todav&iacute;a no hay productos cargados.</td></tr>
           <?php else: ?>
             <?php foreach ($productosInventario as $producto): ?>
               <tr>
                 <td><?= e($producto['nombre']) ?></td>
                 <td><?= e($producto['codigo_barra'] ?: '-') ?></td>
+                <td><?= e($producto['proveedor'] ?: '-') ?></td>
                 <td><?= e($producto['categoria'] ?: '-') ?></td>
                 <td><?= formatearGuaranies($producto['precio_compra']) ?></td>
                 <td><?= formatearGuaranies($producto['precio_venta']) ?></td>
@@ -1491,7 +1498,6 @@ include 'partials/header.php';
     <article class="panel">
       <div class="section-header">
         <h2 id="purchaseFormTitle">Nueva compra</h2>
-        <button type="button" class="small secondary" id="cancelPurchaseEdit" hidden>Cancelar edici&oacute;n</button>
       </div>
       <form action="guardar_compra.php" method="post" class="grid compact purchase-grid" id="purchaseForm">
         <input type="hidden" name="compra_id" id="purchaseCompraId">
@@ -1514,24 +1520,30 @@ include 'partials/header.php';
         <label class="purchase-field purchase-type">Tipo de compra
           <select id="purchaseType">
             <option value="unidad">Unidad</option>
-            <option value="pack">Pack</option>
+            <option value="pack" id="purchaseTypePack">Pack</option>
           </select>
         </label>
-        <label class="purchase-field purchase-quantity">Cantidad <input type="number" id="purchaseQuantity" min="0" step="1" value="1"></label>
+        <div class="purchase-field purchase-quantity quantity-field">
+          <span>Cantidad</span>
+          <div class="quantity-stepper">
+            <button type="button" class="quantity-step" data-purchase-quantity-step="-1" aria-label="Restar cantidad">-</button>
+            <input type="number" id="purchaseQuantity" min="1" step="1" value="1">
+            <button type="button" class="quantity-step" data-purchase-quantity-step="1" aria-label="Sumar cantidad">+</button>
+          </div>
+        </div>
         <label class="purchase-field purchase-price">Precio compra <input type="text" id="purchasePrice" class="money-input" inputmode="numeric" value="0"></label>
         <label class="purchase-field purchase-method">M&eacute;todo
           <select name="metodo" id="purchaseMethod">
             <option value="efectivo">Efectivo</option>
             <option value="transferencia">Transferencia</option>
-            <option value="tarjeta">Tarjeta</option>
-            <option value="otro">Otro</option>
           </select>
         </label>
-        <label class="purchase-field purchase-total">Total estimado <input type="text" id="purchaseTotal" value="0" readonly></label>
+        <input type="hidden" id="purchaseTotal" value="0">
         <button type="button" class="secondary purchase-add-button" id="addPurchaseItem">Agregar producto</button>
+        <button type="button" class="secondary" id="cancelPurchaseEdit" hidden>Cancelar edici&oacute;n</button>
         <div class="cart-list wide" id="purchaseCartList"></div>
         <div id="purchaseCartInputs"></div>
-        <label class="wide">Observaci&oacute;n <textarea name="observacion" rows="2"></textarea></label>
+        <input type="hidden" name="observacion" id="purchaseObservation" value="">
         <button type="submit" id="purchaseSubmitButton">Registrar compra</button>
       </form>
     </article>
@@ -1591,12 +1603,11 @@ include 'partials/header.php';
     <article class="panel">
       <div class="section-header">
         <h2 id="saleFormTitle">Nueva venta</h2>
-        <button type="button" class="small secondary" id="cancelSaleEdit" hidden>Cancelar edici&oacute;n</button>
       </div>
       <?php if (!$cajaAbiertaHoy): ?>
         <div class="notice error">Debes abrir la caja antes de registrar ventas.</div>
       <?php endif; ?>
-      <form action="guardar_venta.php" method="post" class="grid compact" id="saleForm">
+      <form action="guardar_venta.php" method="post" class="grid compact sale-grid" id="saleForm">
         <input type="hidden" name="venta_id" id="saleVentaId">
         <div class="client-picker">
           <label>Cliente
@@ -1606,33 +1617,40 @@ include 'partials/header.php';
           <button type="button" class="add-client-button" id="openSaleQuickClient" title="Agregar cliente">+</button>
           <div class="autocomplete-list" id="saleClientSuggestions"></div>
         </div>
-        <div class="product-picker">
+        <div class="product-picker with-search-button">
           <label>Producto
             <input type="hidden" id="ventaProducto" value="<?= (int)$ventaForm['producto_id'] ?>">
             <input type="search" id="ventaProductoSearch" autocomplete="off" placeholder="Buscar producto o codigo de barras">
           </label>
+          <button type="button" class="add-client-button search-product-button" id="openSaleProductSearch" title="Buscar producto">⌕</button>
           <div class="autocomplete-list" id="productSuggestions"></div>
         </div>
         <label>Tipo de venta
           <select id="ventaTipo">
             <option value="unidad" <?= $ventaForm['tipo_venta'] === 'unidad' ? 'selected' : '' ?>>Unidad</option>
-            <option value="pack" <?= $ventaForm['tipo_venta'] === 'pack' ? 'selected' : '' ?>>Pack</option>
+            <option value="pack" id="ventaTipoPack" <?= $ventaForm['tipo_venta'] === 'pack' ? 'selected' : '' ?>>Pack</option>
           </select>
         </label>
-        <label>Cantidad <input type="number" id="ventaCantidad" min="0" step="1" value="<?= (int)$ventaForm['cantidad'] ?>"></label>
+        <div class="quantity-field">
+          <span>Cantidad</span>
+          <div class="quantity-stepper">
+            <button type="button" class="quantity-step" data-sale-quantity-step="-1" aria-label="Restar cantidad">-</button>
+            <input type="number" id="ventaCantidad" min="1" step="1" value="<?= max(1, (int)$ventaForm['cantidad']) ?>">
+            <button type="button" class="quantity-step" data-sale-quantity-step="1" aria-label="Sumar cantidad">+</button>
+          </div>
+        </div>
         <label>M&eacute;todo
           <select name="metodo" id="saleMethod">
             <option value="efectivo" <?= $ventaForm['metodo'] === 'efectivo' ? 'selected' : '' ?>>Efectivo</option>
             <option value="transferencia" <?= $ventaForm['metodo'] === 'transferencia' ? 'selected' : '' ?>>Transferencia</option>
-            <option value="tarjeta" <?= $ventaForm['metodo'] === 'tarjeta' ? 'selected' : '' ?>>Tarjeta</option>
-            <option value="otro" <?= $ventaForm['metodo'] === 'otro' ? 'selected' : '' ?>>Otro</option>
           </select>
         </label>
         <label>Total estimado <input type="text" id="ventaTotal" value="0" readonly></label>
         <button type="button" class="secondary" id="addSaleItem" <?= !$cajaAbiertaHoy ? 'disabled' : '' ?>>Agregar producto</button>
+        <button type="button" class="secondary" id="cancelSaleEdit" hidden>Cancelar edici&oacute;n</button>
         <div class="cart-list wide" id="saleCartList"></div>
         <div id="saleCartInputs"></div>
-        <label class="wide">Observaci&oacute;n <textarea name="observacion" rows="2"><?= e($ventaForm['observacion']) ?></textarea></label>
+        <input type="hidden" name="observacion" id="saleObservation" value="<?= e($ventaForm['observacion']) ?>">
         <button type="submit" id="saleSubmitButton" <?= !$cajaAbiertaHoy ? 'disabled' : '' ?>>Registrar venta</button>
       </form>
     </article>
@@ -1694,8 +1712,10 @@ include 'partials/header.php';
       <div class="section-header">
         <div>
           <h2>Configuraci&oacute;n</h2>
+          <span class="muted">Sistema de reservas · <?= e(usuarioActual()['nombre'] ?? 'Usuario') ?></span>
           <span class="muted">Administra los usuarios que pueden acceder al sistema.</span>
         </div>
+        <a class="btn small secondary" href="logout.php">Cerrar sesion</a>
       </div>
 
       <?php if ($usuarioMensaje !== ''): ?>
@@ -1868,6 +1888,7 @@ include 'partials/header.php';
         </div>
 
         <footer class="modal-footer">
+          <button type="button" class="secondary" data-reprint-cash-ticket="<?= (int)$cierre['id'] ?>">Reimprimir ticket</button>
           <button type="button" class="secondary" data-close-modal>Cerrar</button>
         </footer>
       </div>
@@ -1884,7 +1905,7 @@ include 'partials/header.php';
       </div>
       <button type="button" class="icon-button" data-close-modal>&times;</button>
     </header>
-    <form action="guardar_reserva.php" method="post" class="modal-body" enctype="multipart/form-data">
+    <form action="guardar_reserva.php" method="post" class="modal-body" id="reservationForm" enctype="multipart/form-data">
       <input type="hidden" name="cancha_id" id="modalCanchaId">
       <input type="hidden" name="fecha" id="modalFecha">
       <input type="hidden" name="hora_inicio" id="modalHoraInicio">
@@ -1899,7 +1920,7 @@ include 'partials/header.php';
       <div class="client-picker">
         <label>Cliente
           <input type="hidden" name="cliente_id" id="modalClienteId" required>
-          <input type="search" id="clientSearch" autocomplete="off" placeholder="Buscar por nombre o telefono">
+          <input type="search" id="clientSearch" autocomplete="off" placeholder="Buscar por nombre o telefono" required>
         </label>
         <button type="button" class="add-client-button" id="openQuickClient" title="Agregar cliente">+</button>
         <div class="autocomplete-list" id="clientSuggestions"></div>
@@ -1923,8 +1944,6 @@ include 'partials/header.php';
           <select name="metodo" id="modalReservaMetodo" <?= !$cajaAbiertaHoy ? 'disabled' : '' ?>>
             <option value="efectivo">Efectivo</option>
             <option value="transferencia">Transferencia</option>
-            <option value="tarjeta">Tarjeta</option>
-            <option value="otro">Otro</option>
           </select>
         </label>
       </div>
@@ -1986,6 +2005,14 @@ include 'partials/header.php';
       <div class="grid compact">
         <label>Nombre <input type="text" name="nombre" id="quickProductName" required></label>
         <label>C&oacute;digo de barras <input type="text" name="codigo_barra" placeholder="Escanear o escribir"></label>
+        <div class="client-picker">
+          <label>Proveedor
+            <input type="hidden" name="proveedor_id" id="quickProductProviderId">
+            <input type="search" id="quickProductProviderSearch" autocomplete="off" placeholder="Sin proveedor">
+          </label>
+          <button type="button" class="add-client-button" data-open-quick-provider="quickProduct" title="Agregar proveedor">+</button>
+          <div class="autocomplete-list" id="quickProductProviderSuggestions"></div>
+        </div>
         <div class="category-picker">
           <label>Categor&iacute;a <input type="text" name="categoria" id="quickProductCategoria" autocomplete="off"></label>
           <button type="button" class="add-client-button" data-add-category="quickProductCategoria" title="Agregar categor&iacute;a">+</button>
@@ -1993,15 +2020,33 @@ include 'partials/header.php';
         </div>
         <label>Precio compra unidad <input type="text" name="precio_compra" id="quickProductCompra" class="money-input" inputmode="numeric" value="0"></label>
         <label>Precio unidad <input type="text" name="precio_venta" class="money-input" inputmode="numeric" value="0"></label>
-        <label>Unidades por pack <input type="number" name="pack_cantidad" min="0" step="1" value="0"></label>
+        <label>Unidades por pack <input type="number" name="pack_cantidad" id="quickProductPackQuantity" min="0" step="1" value="0"></label>
         <label>Precio pack <input type="text" name="precio_pack" class="money-input" inputmode="numeric" value="0"></label>
-        <label>Stock inicial <input type="number" name="stock" min="0" step="1" value="0"></label>
+        <label>Stock inicial <input type="number" name="stock" id="quickProductStock" min="0" step="1" value="0"></label>
       </div>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-quick-product>Cerrar</button>
         <button type="submit">Guardar producto</button>
       </footer>
     </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="saleProductSearchModal" aria-hidden="true">
+  <section class="modal compact-product-search-modal">
+    <header class="modal-header">
+      <h2>Buscar producto</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <div class="modal-body">
+      <label>Buscar
+        <input type="search" id="saleProductSearchModalInput" autocomplete="off" placeholder="Nombre, codigo o categoria">
+      </label>
+      <div class="product-search-results" id="saleProductSearchResults"></div>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cerrar</button>
+      </footer>
+    </div>
   </section>
 </div>
 
@@ -2090,6 +2135,14 @@ include 'partials/header.php';
       <div class="grid compact">
         <label>Nombre <input type="text" name="nombre" id="editProductoNombre" required></label>
         <label>C&oacute;digo de barras <input type="text" name="codigo_barra" id="editProductoCodigo"></label>
+        <div class="client-picker">
+          <label>Proveedor
+            <input type="hidden" name="proveedor_id" id="editProductoProveedorId">
+            <input type="search" id="editProductoProveedorSearch" autocomplete="off" placeholder="Sin proveedor">
+          </label>
+          <button type="button" class="add-client-button" data-open-quick-provider="editProduct" title="Agregar proveedor">+</button>
+          <div class="autocomplete-list" id="editProductoProveedorSuggestions"></div>
+        </div>
         <div class="category-picker">
           <label>Categor&iacute;a <input type="text" name="categoria" id="editProductoCategoria" autocomplete="off"></label>
           <button type="button" class="add-client-button" data-add-category="editProductoCategoria" title="Agregar categor&iacute;a">+</button>
@@ -2174,7 +2227,7 @@ include 'partials/header.php';
 </div>
 
 <div class="modal-backdrop" id="saleCheckoutModal" aria-hidden="true">
-  <section class="modal small-modal">
+  <section class="modal small-modal checkout-modal">
     <header class="modal-header">
       <h2>Registrar venta</h2>
       <button type="button" class="icon-button" data-close-modal>&times;</button>
@@ -2183,6 +2236,13 @@ include 'partials/header.php';
       <div class="checkout-total">
         <span>Total a cobrar</span>
         <strong id="checkoutTotal">0</strong>
+      </div>
+      <div class="checkout-method">
+        <span>M&eacute;todo de pago</span>
+        <select id="checkoutMethod">
+          <option value="efectivo">Efectivo</option>
+          <option value="transferencia">Transferencia</option>
+        </select>
       </div>
       <label>Recibido <input type="text" id="checkoutReceived" class="money-input" inputmode="numeric" value="0"></label>
       <div class="checkout-change">
@@ -2412,20 +2472,15 @@ include 'partials/header.php';
             <div><dt>Cliente</dt><dd><?= e($pagoTicket['cliente']) ?><?= $pagoTicket['telefono'] ? ' - ' . e($pagoTicket['telefono']) : '' ?></dd></div>
             <div><dt>Cancha</dt><dd><?= e($pagoTicket['cancha']) ?></dd></div>
             <div><dt>Reserva</dt><dd>#<?= (int)$pagoTicket['reserva_id'] ?> - <?= e(date('d/m/Y', strtotime($pagoTicket['fecha']))) ?> de <?= e(substr($pagoTicket['hora_inicio'], 0, 5)) ?> a <?= e(substr($pagoTicket['hora_fin'], 0, 5)) ?></dd></div>
-            <div><dt>Descripci&oacute;n</dt><dd><?= formatearGuaranies($pagoTicket['horas']) ?> hs alquiler</dd></div>
             <div><dt>Alquiler</dt><dd><?= formatearGuaranies($pagoTicket['precio_total']) ?></dd></div>
             <div><dt>Consumos</dt><dd><?= formatearGuaranies($pagoTicket['consumo_total']) ?></dd></div>
             <div><dt>Total reserva</dt><dd><?= formatearGuaranies($pagoTicket['total_reserva']) ?></dd></div>
-            <div><dt>Concepto</dt><dd><?= e($pagoTicket['concepto']) ?></dd></div>
-            <div><dt>M&eacute;todo</dt><dd><?= e($pagoTicket['metodo']) ?></dd></div>
-            <div><dt>Fecha pago</dt><dd><?= e(date('d/m/Y H:i', strtotime($pagoTicket['fecha_pago']))) ?></dd></div>
             <?php if (!empty($pagoTicket['comprobante_path'])): ?>
               <div><dt>Comprobante</dt><dd><a href="<?= e($pagoTicket['comprobante_path']) ?>" target="_blank" rel="noopener">Ver imagen</a></dd></div>
             <?php endif; ?>
-            <div class="ticket-total"><dt>Monto pagado</dt><dd><?= formatearGuaranies($pagoTicket['monto']) ?></dd></div>
-            <div><dt>Pagado efectivo</dt><dd><?= formatearGuaranies($pagoTicket['pagado_efectivo']) ?></dd></div>
-            <div><dt>Pagado transferencia</dt><dd><?= formatearGuaranies($pagoTicket['pagado_transferencia']) ?></dd></div>
-            <div><dt>Saldo actual</dt><dd><?= formatearGuaranies(max(0, (float)$pagoTicket['saldo_actual'])) ?></dd></div>
+            <div class="ticket-total"><dt>Total efectivo</dt><dd><?= formatearGuaranies($pagoTicket['pagado_efectivo']) ?></dd></div>
+            <div class="ticket-total-line"><dt>Total transferencia</dt><dd><?= formatearGuaranies($pagoTicket['pagado_transferencia']) ?></dd></div>
+            <div class="ticket-grand-total"><dt>Total pagado</dt><dd><?= formatearGuaranies($pagoTicket['total_pagado']) ?></dd></div>
           </dl>
         </div>
         <footer class="modal-footer">
@@ -2447,7 +2502,7 @@ include 'partials/header.php';
       <div class="reservation-detail" id="reservationDetail"></div>
       <details class="modal-section" id="reservationEditSection">
         <summary>Editar reserva</summary>
-        <form action="editar_reserva.php" method="post" class="grid compact">
+        <form action="editar_reserva.php" method="post" class="grid compact" id="reservationEditForm">
           <input type="hidden" name="reserva_id" id="editReservaId">
           <label>Cliente
             <select name="cliente_id" id="editClienteId" required>
@@ -2464,15 +2519,21 @@ include 'partials/header.php';
             </select>
           </label>
           <label>Fecha <input type="date" name="fecha" id="editFecha" min="<?= e($hoy) ?>" required></label>
-          <label>Hora inicio <input type="time" name="hora_inicio" id="editHoraInicio" required></label>
-          <label>Hora fin <input type="time" name="hora_fin" id="editHoraFin" required></label>
+          <label>Hora inicio
+            <input type="text" id="editHoraInicioHour" inputmode="numeric" pattern="^([0-1]?[0-9]|2[0-3]):00$" required>
+            <input type="hidden" name="hora_inicio" id="editHoraInicio">
+          </label>
+          <label>Hora fin
+            <input type="text" id="editHoraFinHour" inputmode="numeric" pattern="^([0-1]?[0-9]|2[0-4]):00$" required>
+            <input type="hidden" name="hora_fin" id="editHoraFin">
+          </label>
           <label>Precio total <input type="text" name="precio_total" id="editPrecioTotal" class="money-input" inputmode="numeric" required></label>
           <label>Estado
             <select name="estado" id="editEstado" required>
               <option value="reservado">Reservado</option>
               <option value="confirmado">Confirmado</option>
               <option value="finalizado">Finalizado</option>
-              <option value="cancelado">Cancelado</option>
+              <option value="cancelado" id="editEstadoCancelado">Cancelado</option>
             </select>
           </label>
           <label class="wide">Observaci&oacute;n <textarea name="observacion" id="editObservacion" rows="3"></textarea></label>
@@ -2492,20 +2553,10 @@ include 'partials/header.php';
           <div class="notice error wide" id="reservationPaymentCashNotice">Caja cerrada: no se pueden registrar pagos ni abonos.</div>
         <?php endif; ?>
         <label>Monto <input type="text" name="monto" class="money-input" inputmode="numeric" required></label>
-        <label>Concepto
-          <select name="concepto">
-            <option value="saldo">Saldo</option>
-            <option value="sena">Se&ntilde;a</option>
-            <option value="total">Total</option>
-            <option value="extra">Extra</option>
-          </select>
-        </label>
         <label>M&eacute;todo
           <select name="metodo" id="reservationPaymentMethod">
             <option value="efectivo">Efectivo</option>
             <option value="transferencia">Transferencia</option>
-            <option value="tarjeta">Tarjeta</option>
-            <option value="otro">Otro</option>
           </select>
         </label>
         <button type="submit" id="reservationPaymentSubmit">Registrar pago</button>
@@ -2530,7 +2581,7 @@ include 'partials/header.php';
           <label>Tipo
             <select id="reservaVentaTipo">
               <option value="unidad">Unidad</option>
-              <option value="pack">Pack</option>
+              <option value="pack" id="reservaVentaTipoPack">Pack</option>
             </select>
           </label>
           <label>Cantidad <input type="number" id="reservaVentaCantidad" min="1" step="1" value="1"></label>
@@ -2538,8 +2589,6 @@ include 'partials/header.php';
             <select name="metodo">
               <option value="efectivo">Efectivo</option>
               <option value="transferencia">Transferencia</option>
-              <option value="tarjeta">Tarjeta</option>
-              <option value="otro">Otro</option>
             </select>
           </label>
           <label>Total estimado <input type="text" id="reservaVentaTotal" value="0" readonly></label>
@@ -2562,6 +2611,7 @@ include 'partials/header.php';
   let clients = <?= json_encode($clientes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const allClients = <?= json_encode($todosClientes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   let reservations = <?= json_encode($reservas, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+  const reservationConsumptions = <?= json_encode($consumosReservas, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const nextReservationId = <?= (int)$proximaReservaId ?>;
   const initialReservationDetailId = <?= (int)$reservaDetalleId ?>;
   const products = <?= json_encode($productos, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
@@ -2581,6 +2631,23 @@ include 'partials/header.php';
     'saldo_transferencia' => $cajaSaldoTransferencia,
     'movimientos' => $cajaMovimientos,
   ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+  const cashClosedTickets = <?= json_encode(array_reduce($cajaCierresRecientes, function (array $carry, array $cierre) use ($cajaCierresDetalle): array {
+    $detalle = $cajaCierresDetalle[(int)$cierre['id']] ?? ['movimientos' => []];
+    $carry[(int)$cierre['id']] = [
+      'fecha' => $cierre['fecha'],
+      'estado' => $cierre['estado'],
+      'abierta_en' => $cierre['abierta_en'],
+      'cerrada_en' => $cierre['cerrada_en'],
+      'monto_inicial' => (float)$cierre['monto_inicial'],
+      'saldo_total' => (float)($detalle['esperado_total'] ?? 0),
+      'saldo_efectivo' => (float)($detalle['esperado_efectivo'] ?? 0),
+      'saldo_transferencia' => (float)($detalle['esperado_transferencia'] ?? 0),
+      'monto_cierre_efectivo' => (float)$cierre['monto_cierre_efectivo'],
+      'monto_cierre_transferencia' => (float)$cierre['monto_cierre_transferencia'],
+      'movimientos' => $detalle['movimientos'] ?? [],
+    ];
+    return $carry;
+  }, []), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const weekCalendar = document.getElementById('weekCalendar');
   const weekCalendarHeader = document.getElementById('weekCalendarHeader');
   const courtTabs = document.getElementById('courtTabs');
@@ -2589,6 +2656,16 @@ include 'partials/header.php';
   const quickClientModal = document.getElementById('quickClientModal');
   const quickProviderModal = document.getElementById('quickProviderModal');
   const quickProductModal = document.getElementById('quickProductModal');
+  const quickProductName = document.getElementById('quickProductName');
+  const quickProductCompra = document.getElementById('quickProductCompra');
+  const productProviderId = document.getElementById('productProviderId');
+  const productProviderSearch = document.getElementById('productProviderSearch');
+  const productProviderSuggestions = document.getElementById('productProviderSuggestions');
+  const quickProductProviderId = document.getElementById('quickProductProviderId');
+  const quickProductProviderSearch = document.getElementById('quickProductProviderSearch');
+  const quickProductProviderSuggestions = document.getElementById('quickProductProviderSuggestions');
+  const quickProductPackQuantity = document.getElementById('quickProductPackQuantity');
+  const quickProductStock = document.getElementById('quickProductStock');
   const detailModal = document.getElementById('detailModal');
   const courtModal = document.getElementById('courtModal');
   const providerModal = document.getElementById('providerModal');
@@ -2606,6 +2683,9 @@ include 'partials/header.php';
   const ventaProductoId = document.getElementById('ventaProducto');
   const ventaProductoSearch = document.getElementById('ventaProductoSearch');
   const productSuggestions = document.getElementById('productSuggestions');
+  const saleProductSearchModal = document.getElementById('saleProductSearchModal');
+  const saleProductSearchModalInput = document.getElementById('saleProductSearchModalInput');
+  const saleProductSearchResults = document.getElementById('saleProductSearchResults');
   const reservaVentaProductoId = document.getElementById('reservaVentaProducto');
   const reservaVentaProductoSearch = document.getElementById('reservaVentaProductoSearch');
   const reservationProductSuggestions = document.getElementById('reservationProductSuggestions');
@@ -2616,6 +2696,7 @@ include 'partials/header.php';
   const cancelSaleEdit = document.getElementById('cancelSaleEdit');
   const saleCheckoutModal = document.getElementById('saleCheckoutModal');
   const checkoutTotal = document.getElementById('checkoutTotal');
+  const checkoutMethod = document.getElementById('checkoutMethod');
   const checkoutReceived = document.getElementById('checkoutReceived');
   const checkoutChange = document.getElementById('checkoutChange');
   const checkoutPrintTicket = document.getElementById('checkoutPrintTicket');
@@ -2631,11 +2712,21 @@ include 'partials/header.php';
   const cancelSaleConfirmModal = document.getElementById('cancelSaleConfirmModal');
   const confirmCancelSale = document.getElementById('confirmCancelSale');
   const editSaleFromDetail = document.getElementById('editSaleFromDetail');
+  const clientListSearch = document.getElementById('clientListSearch');
+  const clientListCount = document.getElementById('clientListCount');
+  const clientListPagination = document.getElementById('clientListPagination');
+  const categoryListSearch = document.getElementById('categoryListSearch');
+  const categoryListCount = document.getElementById('categoryListCount');
+  const categoryListPagination = document.getElementById('categoryListPagination');
   const providerSearch = document.getElementById('providerSearch');
   const providerCount = document.getElementById('providerCount');
+  const providerListPagination = document.getElementById('providerListPagination');
   const purchaseProviderId = document.getElementById('purchaseProviderId');
   const purchaseProviderSearch = document.getElementById('purchaseProviderSearch');
   const purchaseProviderSuggestions = document.getElementById('purchaseProviderSuggestions');
+  const editProductoProveedorId = document.getElementById('editProductoProveedorId');
+  const editProductoProveedorSearch = document.getElementById('editProductoProveedorSearch');
+  const editProductoProveedorSuggestions = document.getElementById('editProductoProveedorSuggestions');
   const purchaseForm = document.getElementById('purchaseForm');
   const purchaseCompraId = document.getElementById('purchaseCompraId');
   const purchaseFormTitle = document.getElementById('purchaseFormTitle');
@@ -2660,6 +2751,7 @@ include 'partials/header.php';
   const editPurchaseFromDetail = document.getElementById('editPurchaseFromDetail');
   let selectedSaleDetailId = null;
   let selectedPurchaseDetailId = null;
+  const confirmedPendingReceiptIds = new Set();
   const hourStart = 7;
   const hourEnd = 24;
   const dayNames = ['dom', 'lun', 'mar', 'mie', 'jue', 'vie', 'sab'];
@@ -2677,12 +2769,62 @@ include 'partials/header.php';
   let reservationSaleCart = [];
   let purchaseCart = [];
   let quickClientTarget = 'reservation';
+  let quickProviderTarget = 'purchase';
+  let quickProductOpenedFromPurchase = false;
   let saleSubmitConfirmed = false;
   let cashCloseConfirmed = false;
   let editingSaleId = null;
   let editingSaleOriginalUnits = {};
   let reservationFeedSignature = JSON.stringify(reservations);
   let reservationFeedLoading = false;
+
+  function shouldProtectSubmit(form) {
+    const action = form.getAttribute('action') || '';
+    return [
+      'guardar_pago.php',
+      'guardar_caja.php',
+      'guardar_venta.php',
+      'guardar_reserva.php',
+      'guardar_reserva_publica.php',
+      'anular_venta.php',
+      'anular_compra.php'
+    ].some((path) => action.includes(path));
+  }
+
+  function lockSubmitForm(form, submitter = null) {
+    if (!shouldProtectSubmit(form)) {
+      return;
+    }
+
+    form.dataset.submitting = '1';
+    const buttons = new Set(Array.from(form.querySelectorAll('button[type="submit"], input[type="submit"]')));
+    if (form.id) {
+      document.querySelectorAll(`button[form="${form.id}"], input[form="${form.id}"]`).forEach((button) => buttons.add(button));
+    }
+    if (submitter) {
+      buttons.add(submitter);
+    }
+
+    buttons.forEach((button) => {
+      button.disabled = true;
+      if (button.tagName === 'BUTTON') {
+        button.dataset.originalText = button.dataset.originalText || button.textContent;
+        button.textContent = 'Procesando...';
+      }
+    });
+  }
+
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !shouldProtectSubmit(form)) {
+      return;
+    }
+
+    if (form.dataset.submitting === '1') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
 
   function showModule(moduleId) {
     modules.forEach((module) => module.classList.toggle('active', module.id === moduleId));
@@ -2894,6 +3036,7 @@ include 'partials/header.php';
   function selectClient(client) {
     modalClienteId.value = client.id;
     clientSearch.value = clientLabel(client);
+    clientSearch.setCustomValidity('');
     clientSuggestions.innerHTML = '';
     clientSuggestions.classList.remove('open');
   }
@@ -2910,19 +3053,39 @@ include 'partials/header.php';
     return `${provider.nombre}${phone}`;
   }
 
-  function selectPurchaseProvider(provider) {
-    purchaseProviderId.value = provider.id;
-    purchaseProviderSearch.value = providerLabel(provider);
-    purchaseProviderSuggestions.innerHTML = '';
-    purchaseProviderSuggestions.classList.remove('open');
+  function selectProviderForField(provider, idInput, searchInput, suggestionsElement) {
+    if (!idInput || !searchInput || !suggestionsElement) {
+      return;
+    }
+
+    idInput.value = provider.id;
+    searchInput.value = providerLabel(provider);
+    suggestionsElement.innerHTML = '';
+    suggestionsElement.classList.remove('open');
   }
 
-  function renderProviderSuggestions(query) {
+  function selectPurchaseProvider(provider) {
+    selectProviderForField(provider, purchaseProviderId, purchaseProviderSearch, purchaseProviderSuggestions);
+  }
+
+  function selectProductProvider(provider) {
+    selectProviderForField(provider, productProviderId, productProviderSearch, productProviderSuggestions);
+  }
+
+  function selectQuickProductProvider(provider) {
+    selectProviderForField(provider, quickProductProviderId, quickProductProviderSearch, quickProductProviderSuggestions);
+  }
+
+  function selectEditProductProvider(provider) {
+    selectProviderForField(provider, editProductoProveedorId, editProductoProveedorSearch, editProductoProveedorSuggestions);
+  }
+
+  function renderProviderSuggestions(query, suggestionsElement = purchaseProviderSuggestions, onSelect = selectPurchaseProvider) {
     const term = String(query || '').trim().toLowerCase();
-    purchaseProviderSuggestions.innerHTML = '';
+    suggestionsElement.innerHTML = '';
 
     if (term.length < 1) {
-      purchaseProviderSuggestions.classList.remove('open');
+      suggestionsElement.classList.remove('open');
       return;
     }
 
@@ -2935,8 +3098,8 @@ include 'partials/header.php';
       const empty = document.createElement('div');
       empty.className = 'autocomplete-empty';
       empty.textContent = 'Sin proveedores. Usa + para agregar.';
-      purchaseProviderSuggestions.appendChild(empty);
-      purchaseProviderSuggestions.classList.add('open');
+      suggestionsElement.appendChild(empty);
+      suggestionsElement.classList.add('open');
       return;
     }
 
@@ -2945,11 +3108,11 @@ include 'partials/header.php';
       option.type = 'button';
       option.className = 'autocomplete-option';
       option.innerHTML = `<strong>${escapeHtml(provider.nombre)}</strong><span>${escapeHtml(provider.telefono || provider.ruc || '')}</span>`;
-      option.addEventListener('click', () => selectPurchaseProvider(provider));
-      purchaseProviderSuggestions.appendChild(option);
+      option.addEventListener('click', () => onSelect(provider));
+      suggestionsElement.appendChild(option);
     });
 
-    purchaseProviderSuggestions.classList.add('open');
+    suggestionsElement.classList.add('open');
   }
 
   function renderClientSuggestions(query, suggestionsElement = clientSuggestions, onSelect = selectClient, allowEmpty = false) {
@@ -3023,6 +3186,7 @@ include 'partials/header.php';
     clientMessageText.textContent = message;
     clientMessageModal.classList.add('open');
     clientMessageModal.setAttribute('aria-hidden', 'false');
+    clientMessageModal.querySelector('button')?.focus();
   }
 
   function openReceiptImageModal(url, pendingId = '', reservaId = '') {
@@ -3030,21 +3194,35 @@ include 'partials/header.php';
       return;
     }
     receiptImagePreview.src = url;
-    const hasPendingConfirmation = pendingId !== '';
+    const pendingKey = String(pendingId || '');
+    const hasPendingConfirmation = pendingKey !== '' && !confirmedPendingReceiptIds.has(pendingKey);
     if (confirmPendingReceiptForm && confirmPendingReceiptId && confirmPendingReceiptReservaId && confirmPendingReceiptButton) {
+      confirmPendingReceiptForm.dataset.submitting = '';
+      confirmPendingReceiptForm.dataset.receiptConfirmed = hasPendingConfirmation ? '' : '1';
       confirmPendingReceiptId.value = pendingId;
       confirmPendingReceiptReservaId.value = reservaId;
       confirmPendingReceiptForm.hidden = !hasPendingConfirmation;
       confirmPendingReceiptButton.hidden = !hasPendingConfirmation;
+      confirmPendingReceiptButton.disabled = false;
+      confirmPendingReceiptButton.textContent = 'Confirmado';
     }
     receiptImageModal.classList.add('open');
     receiptImageModal.setAttribute('aria-hidden', 'false');
   }
 
-  confirmPendingReceiptForm?.addEventListener('submit', () => {
+  confirmPendingReceiptForm?.addEventListener('submit', (event) => {
+    if (confirmPendingReceiptForm.dataset.receiptConfirmed === '1') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    confirmPendingReceiptForm.dataset.receiptConfirmed = '1';
+    if (confirmPendingReceiptId?.value) {
+      confirmedPendingReceiptIds.add(String(confirmPendingReceiptId.value));
+    }
     if (confirmPendingReceiptButton) {
       confirmPendingReceiptButton.disabled = true;
-      confirmPendingReceiptButton.textContent = 'Confirmado';
+      confirmPendingReceiptButton.textContent = 'Procesando...';
     }
   });
 
@@ -3059,7 +3237,7 @@ include 'partials/header.php';
     purchaseProductSearch.value = purchaseProductLabel(product);
     purchaseProductSuggestions.innerHTML = '';
     purchaseProductSuggestions.classList.remove('open');
-    document.getElementById('purchasePrice').value = money(product.precio_compra || 0);
+    updatePurchasePriceForType();
     updatePurchaseTotal();
   }
 
@@ -3095,7 +3273,7 @@ include 'partials/header.php';
       const option = document.createElement('button');
       option.type = 'button';
       option.className = 'autocomplete-option';
-      option.innerHTML = `<strong>${escapeHtml(product.nombre)}</strong><span>${escapeHtml(product.codigo_barra || product.categoria || '')} | Stock ${Number(product.stock || 0)} | Compra unidad ${money(product.precio_compra)}</span>`;
+      option.innerHTML = `<strong>${escapeHtml(product.nombre)}</strong><span>${escapeHtml(product.codigo_barra || product.categoria || '')} | Stock ${Number(product.stock || 0)} | ${money(product.precio_compra)}</span>`;
       option.addEventListener('click', () => selectPurchaseProduct(product));
       purchaseProductSuggestions.appendChild(option);
     });
@@ -3109,6 +3287,7 @@ include 'partials/header.php';
     const productIdInput = isReservation ? reservaVentaProductoId : ventaProductoId;
     const productSearchInput = isReservation ? reservaVentaProductoSearch : ventaProductoSearch;
     const suggestions = isReservation ? reservationProductSuggestions : productSuggestions;
+    const typeInput = document.getElementById(isReservation ? 'reservaVentaTipo' : 'ventaTipo');
     const disponible = availableStock(product, cart);
     if (disponible <= 0) {
       if (isReservation) {
@@ -3120,6 +3299,7 @@ include 'partials/header.php';
       productSearchInput.value = '';
       suggestions.innerHTML = '';
       suggestions.classList.remove('open');
+      syncSaleTypeOptions(target);
       isReservation ? updateReservationSaleTotal() : updateSaleTotal();
       showClientMessage(`${product.nombre} no tiene stock disponible. Carga stock en Productos antes de vender.`);
       return;
@@ -3131,14 +3311,22 @@ include 'partials/header.php';
       selectedSaleProduct = product;
     }
     productIdInput.value = product.id;
+    if (typeInput) {
+      typeInput.value = 'unidad';
+    }
     productSearchInput.value = productLabel(product, cart);
     suggestions.innerHTML = '';
     suggestions.classList.remove('open');
+    syncSaleTypeOptions(target);
     isReservation ? updateReservationSaleTotal() : updateSaleTotal();
   }
 
   function cartTotal(cart) {
     return cart.reduce((sum, item) => sum + item.subtotal, 0);
+  }
+
+  function cartItemsCount(cart) {
+    return cart.reduce((sum, item) => sum + Number(item.units || item.quantity || 0), 0);
   }
 
   function cartItemUnitPrice(item) {
@@ -3164,34 +3352,51 @@ include 'partials/header.php';
       return;
     }
 
-    list.innerHTML = `
-      <table>
-        <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
-        <tbody>
-          ${cart.map((item, index) => `
-            <tr>
-              <td>${escapeHtml(item.product.nombre)}</td>
-              <td>${escapeHtml(item.type)}</td>
-              <td>
-                <input
-                  type="number"
-                  class="cart-quantity"
-                  min="1"
-                  step="1"
-                  value="${Number(item.quantity)}"
-                  data-cart-quantity="${index}"
-                  data-cart-list="${listId}"
-                  aria-label="Cantidad de ${escapeHtml(item.product.nombre)}"
-                >
-              </td>
-              <td>${money(item.subtotal)}</td>
-              <td><button type="button" class="small danger" data-remove-cart-item="${index}" data-cart-list="${listId}">Quitar</button></td>
-            </tr>
-          `).join('')}
-          <tr class="cart-total-row"><th colspan="3">Total productos</th><th colspan="2">${money(cartTotal(cart))}</th></tr>
-        </tbody>
-      </table>
-    `;
+    const rows = cart.map((item, index) => `
+      <tr>
+        <td>${escapeHtml(item.product.nombre)}</td>
+        <td>${escapeHtml(item.type)}</td>
+        <td>
+          <input
+            type="number"
+            class="cart-quantity"
+            min="1"
+            step="1"
+            value="${Number(item.quantity)}"
+            data-cart-quantity="${index}"
+            data-cart-list="${listId}"
+            aria-label="Cantidad de ${escapeHtml(item.product.nombre)}"
+          >
+        </td>
+        <td>${money(item.subtotal)}</td>
+        <td><button type="button" class="small danger" data-remove-cart-item="${index}" data-cart-list="${listId}">Quitar</button></td>
+      </tr>
+    `).join('');
+
+    if (listId === 'saleCartList') {
+      list.innerHTML = `
+        <div class="sale-cart-scroll">
+          <table>
+            <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="sale-cart-total">
+          <span><strong>Total productos</strong> <span class="cart-total-items">${cartItemsCount(cart)} item(s) cargado(s)</span></span>
+          <strong>${money(cartTotal(cart))}</strong>
+        </div>
+      `;
+    } else {
+      list.innerHTML = `
+        <table>
+          <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
+          <tbody>
+            ${rows}
+            <tr class="cart-total-row"><th colspan="3">Total productos <span class="cart-total-items">${cartItemsCount(cart)} item(s) cargado(s)</span></th><th colspan="2">${money(cartTotal(cart))}</th></tr>
+          </tbody>
+        </table>
+      `;
+    }
 
     cart.forEach((item) => {
       inputs.insertAdjacentHTML('beforeend', `
@@ -3220,24 +3425,29 @@ include 'partials/header.php';
     }
 
     list.innerHTML = `
-      <table>
-        <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Precio</th><th>Subtotal</th><th></th></tr></thead>
-        <tbody>
-          ${purchaseCart.map((item, index) => `
-            <tr>
-              <td>${escapeHtml(item.product.nombre)}</td>
-              <td>${escapeHtml(item.type)}</td>
-              <td>
-                <input type="number" class="cart-quantity" min="1" step="1" value="${Number(item.quantity)}" data-purchase-quantity="${index}" aria-label="Cantidad de ${escapeHtml(item.product.nombre)}">
-              </td>
-              <td>${money(item.price)}</td>
-              <td>${money(item.subtotal)}</td>
-              <td><button type="button" class="small danger" data-remove-purchase-item="${index}">Quitar</button></td>
-            </tr>
-          `).join('')}
-          <tr class="cart-total-row"><th colspan="4">Total productos</th><th colspan="2">${money(cartTotal(purchaseCart))}</th></tr>
-        </tbody>
-      </table>
+      <div class="purchase-cart-scroll">
+        <table>
+          <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Precio</th><th>Subtotal</th><th></th></tr></thead>
+          <tbody>
+            ${purchaseCart.map((item, index) => `
+              <tr>
+                <td>${escapeHtml(item.product.nombre)}</td>
+                <td>${escapeHtml(item.type)}</td>
+                <td>
+                  <input type="number" class="cart-quantity" min="1" step="1" value="${Number(item.quantity)}" data-purchase-quantity="${index}" aria-label="Cantidad de ${escapeHtml(item.product.nombre)}">
+                </td>
+                <td>${money(item.price)}</td>
+                <td>${money(item.subtotal)}</td>
+                <td><button type="button" class="small danger" data-remove-purchase-item="${index}">Quitar</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="purchase-cart-total">
+        <span><strong>Total productos</strong> <span class="cart-total-items">${cartItemsCount(purchaseCart)} item(s) cargado(s)</span></span>
+        <strong>${money(cartTotal(purchaseCart))}</strong>
+      </div>
     `;
 
     purchaseCart.forEach((item) => {
@@ -3246,6 +3456,7 @@ include 'partials/header.php';
         <input type="hidden" name="tipo_compra[]" value="${escapeHtml(item.type)}">
         <input type="hidden" name="cantidad[]" value="${Number(item.quantity)}">
         <input type="hidden" name="precio_unitario[]" value="${Number(item.price)}">
+        <input type="hidden" name="stock_ya_cargado[]" value="${item.stockAlreadyLoaded ? '1' : '0'}">
       `);
     });
   }
@@ -3260,6 +3471,69 @@ include 'partials/header.php';
     item.subtotal = item.price * nextQuantity;
     renderPurchaseCart();
     updatePurchaseTotal();
+  }
+
+  function maxSaleCartQuantity(product, cart, type) {
+    const available = availableStock(product, cart);
+    if (type === 'pack') {
+      const packQuantity = Number(product?.pack_cantidad || 0);
+      return packQuantity > 0 ? Math.floor(available / packQuantity) : 0;
+    }
+
+    return available;
+  }
+
+  function productAllowsPack(product) {
+    return Number(product?.pack_cantidad || 0) > 0 && Number(product?.precio_pack || 0) > 0;
+  }
+
+  function syncSaleTypeOptions(target = 'sale') {
+    const isReservation = target === 'reservation';
+    const product = isReservation ? selectedReservationSaleProduct : selectedSaleProduct;
+    const typeInput = document.getElementById(isReservation ? 'reservaVentaTipo' : 'ventaTipo');
+    const packOption = document.getElementById(isReservation ? 'reservaVentaTipoPack' : 'ventaTipoPack');
+    if (!typeInput || !packOption) {
+      return;
+    }
+
+    const packAllowed = productAllowsPack(product);
+    packOption.disabled = !packAllowed;
+    packOption.textContent = packAllowed ? 'Pack' : 'Pack (no disponible)';
+    if (!packAllowed && typeInput.value === 'pack') {
+      typeInput.value = 'unidad';
+    }
+  }
+
+  function clampSaleQuantity(target = 'sale') {
+    const isReservation = target === 'reservation';
+    const product = isReservation ? selectedReservationSaleProduct : selectedSaleProduct;
+    const cart = isReservation ? reservationSaleCart : saleCart;
+    const typeInput = document.getElementById(isReservation ? 'reservaVentaTipo' : 'ventaTipo');
+    const quantityInput = document.getElementById(isReservation ? 'reservaVentaCantidad' : 'ventaCantidad');
+    if (!quantityInput) {
+      return 0;
+    }
+
+    quantityInput.min = '1';
+    syncSaleTypeOptions(target);
+    if (!product) {
+      quantityInput.removeAttribute('max');
+      return Number(quantityInput.value || 0);
+    }
+
+    const maxQuantity = maxSaleCartQuantity(product, cart, typeInput?.value || 'unidad');
+    quantityInput.max = String(maxQuantity);
+
+    const currentQuantity = Number(quantityInput.value || 0);
+    if (currentQuantity > maxQuantity) {
+      quantityInput.value = String(maxQuantity);
+    } else if (currentQuantity < 1 && maxQuantity > 0) {
+      quantityInput.value = '1';
+    } else if (currentQuantity < 0) {
+      quantityInput.value = '0';
+    }
+
+    return Number(quantityInput.value || 0);
   }
 
   function updateCartQuantity(cartName, index, quantity) {
@@ -3449,6 +3723,45 @@ include 'partials/header.php';
     suggestions.classList.add('open');
   }
 
+  function renderSaleProductSearchModal() {
+    if (!saleProductSearchResults) {
+      return;
+    }
+
+    const term = String(saleProductSearchModalInput?.value || '').trim().toLowerCase();
+    const matches = activeProducts()
+      .filter((product) => `${product.nombre} ${product.codigo_barra || ''} ${product.categoria || ''}`.toLowerCase().includes(term))
+      .slice(0, 80);
+
+    if (matches.length === 0) {
+      saleProductSearchResults.innerHTML = '<p class="muted">No se encontraron productos.</p>';
+      return;
+    }
+
+    saleProductSearchResults.innerHTML = '';
+    matches.forEach((product) => {
+      const stock = availableStock(product, saleCart);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'product-search-row';
+      button.disabled = stock <= 0;
+      button.innerHTML = `
+        <span>
+          <strong>${escapeHtml(product.nombre)}</strong>
+          <span>${escapeHtml(product.codigo_barra || product.categoria || '-')} | ${stock <= 0 ? 'Sin stock' : 'Stock ' + stock}</span>
+        </span>
+        <span class="product-search-price">${money(product.precio_venta)}</span>
+      `;
+      button.addEventListener('click', () => {
+        selectSaleProduct(product);
+        saleProductSearchModal?.classList.remove('open');
+        saleProductSearchModal?.setAttribute('aria-hidden', 'true');
+        document.getElementById('ventaCantidad')?.focus();
+      });
+      saleProductSearchResults.appendChild(button);
+    });
+  }
+
   function timeLabel(hour) {
     return String(hour).padStart(2, '0') + ':00';
   }
@@ -3474,7 +3787,34 @@ include 'partials/header.php';
     return hours + (minutes / 60);
   }
 
+  function syncEditHourInput(sourceId, targetId) {
+    const source = document.getElementById(sourceId);
+    const target = document.getElementById(targetId);
+    if (!source || !target) {
+      return;
+    }
+
+    const min = Number(source.dataset.minHour || 0);
+    const max = Number(source.dataset.maxHour || 24);
+    const match = String(source.value || '').match(/\d{1,2}/);
+    const rawHour = match ? Number(match[0]) : min;
+    const hour = Math.min(max, Math.max(min, Math.floor(rawHour)));
+    source.value = `${String(hour).padStart(2, '0')}:00`;
+    target.value = `${String(hour).padStart(2, '0')}:00`;
+  }
+
+  function syncEditHours() {
+    syncEditHourInput('editHoraInicioHour', 'editHoraInicio');
+    const start = reservationTimeToHours(document.getElementById('editHoraInicio')?.value) || 7;
+    const endInput = document.getElementById('editHoraFinHour');
+    if (endInput) {
+      endInput.dataset.minHour = String(Math.min(24, start + 1));
+    }
+    syncEditHourInput('editHoraFinHour', 'editHoraFin');
+  }
+
   function updateEditReservationPrice() {
+    syncEditHours();
     const courtId = Number(document.getElementById('editCanchaId')?.value || 0);
     const start = reservationTimeToHours(document.getElementById('editHoraInicio')?.value);
     const end = reservationTimeToHours(document.getElementById('editHoraFin')?.value);
@@ -3793,26 +4133,74 @@ include 'partials/header.php';
     const paymentMethod = document.getElementById('reservationPaymentMethod');
     const paymentSubmit = document.getElementById('reservationPaymentSubmit');
     const isPaid = Number(item.saldo || 0) <= 0;
+    const consumoDetalle = reservationConsumptions[String(item.id)] || reservationConsumptions[Number(item.id)] || [];
+    const hasPendingReceiptToConfirm = Boolean(item.abono_pendiente_comprobante_path) && item.abono_pendiente_estado === 'revision';
     paidNotice.hidden = !isPaid;
     paymentSection.classList.toggle('is-paid', isPaid);
+    paymentSection.classList.toggle('has-pending-receipt', hasPendingReceiptToConfirm);
     document.getElementById('detailPagoIdMetodo').value = item.ultimo_pago_id || '';
     document.getElementById('updatePaymentMethodFlag').value = isPaid && item.ultimo_pago_id ? '1' : '0';
-    paymentMethod.value = item.ultimo_pago_metodo || 'efectivo';
+    paymentMethod.value = isPaid ? (item.ultimo_pago_metodo || 'efectivo') : 'efectivo';
     paymentSubmit.textContent = isPaid ? 'Actualizar metodo' : (cashOpenToday ? 'Registrar pago' : 'Caja cerrada');
     paymentSubmit.disabled = isPaid ? !item.ultimo_pago_id : !cashOpenToday;
-    paymentForm.querySelectorAll('input[name="monto"], select[name="concepto"]').forEach((field) => {
+    paymentForm.dataset.saldo = String(Math.max(0, Number(item.saldo || 0)));
+    paymentForm.querySelectorAll('input[name="monto"]').forEach((field) => {
       field.disabled = isPaid || !cashOpenToday;
     });
     document.getElementById('paymentReservationSummary').innerHTML = `
-      <div><span>Alquiler</span><strong>${money(item.precio_total)}</strong></div>
-      <div><span>Consumos</span><strong>${money(item.consumo_total)}</strong></div>
-      <div><span>Total reserva</span><strong>${money(item.total_alcanzado)}</strong></div>
-      <div><span>Pagado</span><strong>${money(item.pagado)}</strong></div>
-      <div><span>Pagado efectivo</span><strong>${money(item.pagado_efectivo)}</strong></div>
-      <div><span>Pagado transferencia</span><strong>${money(item.pagado_transferencia)}</strong></div>
-      <div class="${Number(item.saldo || 0) > 0 ? 'pending-balance' : ''}"><span>Saldo total</span><strong>${money(item.saldo)}</strong></div>
+      <table class="payment-summary-table">
+        <thead>
+          <tr>
+            <th>Detalle</th>
+            <th>Tipo</th>
+            <th>Cant.</th>
+            <th>Precio</th>
+            <th>Subtotal</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Reserva - ${escapeHtml(item.cancha || '')}</td>
+            <td>Alquiler</td>
+            <td>1</td>
+            <td>${money(item.precio_total)}</td>
+            <td>${money(item.precio_total)}</td>
+          </tr>
+          ${consumoDetalle.length ? consumoDetalle.map((consumo) => `
+            <tr>
+              <td>${escapeHtml(consumo.producto || '')}</td>
+              <td>${escapeHtml(consumo.tipo_venta || '')}</td>
+              <td>${Number(consumo.cantidad || 0)}</td>
+              <td>${money(consumo.precio_unitario)}</td>
+              <td>${money(consumo.subtotal)}</td>
+            </tr>
+          `).join('') : '<tr><td colspan="5" class="muted">Sin consumos registrados.</td></tr>'}
+        </tbody>
+        <tfoot>
+          <tr>
+            <th colspan="3">Total reserva</th>
+            <th colspan="2">${money(item.total_alcanzado)}</th>
+          </tr>
+          <tr>
+            <th colspan="3">Pagado</th>
+            <th colspan="2">${money(item.pagado)}</th>
+          </tr>
+          <tr>
+            <th colspan="3">Pagado efectivo</th>
+            <th colspan="2">${money(item.pagado_efectivo)}</th>
+          </tr>
+          <tr>
+            <th colspan="3">Pagado transferencia</th>
+            <th colspan="2">${money(item.pagado_transferencia)}</th>
+          </tr>
+          <tr class="${Number(item.saldo || 0) > 0 ? 'pending-balance' : ''}">
+            <th colspan="3">Saldo total</th>
+            <th colspan="2">${money(item.saldo)}</th>
+          </tr>
+        </tfoot>
+      </table>
       ${item.comprobante_path ? `<div class="payment-receipt-action"><span>Comprobante</span><button type="button" class="small secondary" id="viewReservationReceipt">Ver comprobante</button></div>` : ''}
-      ${item.abono_pendiente_comprobante_path ? `<div class="payment-receipt-action"><span>Comprobante pendiente ${item.abono_pendiente_monto ? money(item.abono_pendiente_monto) : ''}</span><button type="button" class="small secondary" id="viewPendingReservationReceipt">Ver comprobante</button></div>` : ''}
+      ${item.abono_pendiente_comprobante_path ? `<div class="payment-receipt-action pending-receipt-alert"><span>Comprobante pendiente de confirmar ${item.abono_pendiente_monto ? money(item.abono_pendiente_monto) : ''}</span><button type="button" class="small danger" id="viewPendingReservationReceipt">Ver comprobante</button></div>` : ''}
     `;
     document.getElementById('viewReservationReceipt')?.addEventListener('click', () => openReceiptImageModal(item.comprobante_path));
     document.getElementById('viewPendingReservationReceipt')?.addEventListener('click', () => {
@@ -3827,10 +4215,28 @@ include 'partials/header.php';
     document.getElementById('editClienteId').value = item.cliente_id;
     document.getElementById('editCanchaId').value = item.cancha_id;
     document.getElementById('editFecha').value = item.fecha;
-    document.getElementById('editHoraInicio').value = String(item.hora_inicio).slice(0, 5);
-    document.getElementById('editHoraFin').value = String(item.hora_fin).slice(0, 5);
+    const editHoraInicioHour = document.getElementById('editHoraInicioHour');
+    const editHoraFinHour = document.getElementById('editHoraFinHour');
+    const startHour = Number(String(item.hora_inicio).slice(0, 2));
+    const endHour = Number(String(item.hora_fin).slice(0, 2));
+    editHoraInicioHour.dataset.minHour = String(Math.max(7, startHour));
+    editHoraInicioHour.dataset.maxHour = '23';
+    editHoraFinHour.dataset.minHour = String(Math.min(24, Math.max(startHour + 1, 8)));
+    editHoraFinHour.dataset.maxHour = '24';
+    editHoraInicioHour.value = `${String(startHour).padStart(2, '0')}:00`;
+    editHoraFinHour.value = `${String(endHour).padStart(2, '0')}:00`;
+    syncEditHours();
     document.getElementById('editPrecioTotal').value = money(item.precio_total);
-    document.getElementById('editEstado').value = item.estado;
+    const reservationEditForm = document.getElementById('reservationEditForm');
+    reservationEditForm.dataset.saldo = String(Math.max(0, Number(item.saldo || 0)));
+    reservationEditForm.dataset.estadoOriginal = item.estado || 'reservado';
+    const editEstado = document.getElementById('editEstado');
+    const editEstadoCancelado = document.getElementById('editEstadoCancelado');
+    if (editEstadoCancelado) {
+      editEstadoCancelado.disabled = Number(item.pagado || 0) > 0;
+      editEstadoCancelado.textContent = Number(item.pagado || 0) > 0 ? 'Cancelado (bloqueado por pago)' : 'Cancelado';
+    }
+    editEstado.value = item.estado === 'cancelado' && Number(item.pagado || 0) > 0 ? 'confirmado' : item.estado;
     document.getElementById('editObservacion').value = item.observacion || '';
     document.getElementById('reservationDetail').innerHTML = `
       <dl>
@@ -3844,7 +4250,7 @@ include 'partials/header.php';
         <div><dt>Pagado</dt><dd>${money(item.pagado)}</dd></div>
         <div><dt>Pagado efectivo</dt><dd>${money(item.pagado_efectivo)}</dd></div>
         <div><dt>Pagado transferencia</dt><dd>${money(item.pagado_transferencia)}</dd></div>
-        <div><dt>Saldo total</dt><dd>${money(item.saldo)}</dd></div>
+        <div class="${Number(item.saldo || 0) > 0 ? 'pending-balance' : ''}"><dt>Saldo total</dt><dd>${money(item.saldo)}</dd></div>
       </dl>
     `;
     updateReservationSaleTotal();
@@ -3861,6 +4267,10 @@ include 'partials/header.php';
     document.getElementById('editProductoId').value = product.id;
     document.getElementById('editProductoNombre').value = product.nombre || '';
     document.getElementById('editProductoCodigo').value = product.codigo_barra || '';
+    editProductoProveedorId.value = product.proveedor_id || '';
+    editProductoProveedorSearch.value = product.proveedor || '';
+    editProductoProveedorSuggestions.innerHTML = '';
+    editProductoProveedorSuggestions.classList.remove('open');
     document.getElementById('editProductoCategoria').value = product.categoria || '';
     const editCategorySuggestions = categorySuggestions('editProductoCategoria');
     if (editCategorySuggestions) {
@@ -3925,26 +4335,108 @@ include 'partials/header.php';
     deleteProviderModal.setAttribute('aria-hidden', 'false');
   }
 
-  function filterProviders() {
-    const query = (providerSearch?.value || '').trim().toLowerCase();
-    const rows = document.querySelectorAll('[data-provider-row]');
-    const emptyRow = document.querySelector('[data-provider-empty]');
-    let visible = 0;
+  const simpleListPageSize = 10;
+  const simpleListPages = {
+    clients: 1,
+    categories: 1,
+    providers: 1
+  };
+
+  function renderSimpleListPagination(config) {
+    const rows = Array.from(document.querySelectorAll(config.rowSelector));
+    const query = (config.search?.value || '').trim().toLowerCase();
+    const filteredRows = rows.filter((row) => (row.dataset[config.searchDataset] || '').includes(query));
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / simpleListPageSize));
+    simpleListPages[config.key] = Math.min(simpleListPages[config.key] || 1, totalPages);
+    const currentPage = simpleListPages[config.key];
+    const start = (currentPage - 1) * simpleListPageSize;
+    const end = start + simpleListPageSize;
 
     rows.forEach((row) => {
-      const match = (row.dataset.providerSearch || '').includes(query);
-      row.hidden = !match;
-      if (match) {
-        visible += 1;
-      }
+      row.hidden = true;
+    });
+    filteredRows.slice(start, end).forEach((row) => {
+      row.hidden = false;
     });
 
-    if (providerCount) {
-      providerCount.textContent = `${visible} registrado(s)`;
+    if (config.count) {
+      config.count.textContent = `${filteredRows.length} ${config.label}`;
     }
-    if (emptyRow) {
-      emptyRow.hidden = visible > 0;
+    if (config.empty) {
+      config.empty.hidden = filteredRows.length > 0;
     }
+    if (!config.pagination) {
+      return;
+    }
+
+    config.pagination.innerHTML = '';
+    if (filteredRows.length <= simpleListPageSize) {
+      return;
+    }
+
+    const prevButton = document.createElement('button');
+    prevButton.type = 'button';
+    prevButton.className = 'secondary';
+    prevButton.textContent = 'Anterior';
+    prevButton.disabled = currentPage <= 1;
+    prevButton.addEventListener('click', () => {
+      simpleListPages[config.key] = Math.max(1, currentPage - 1);
+      renderSimpleListPagination(config);
+    });
+
+    const pageLabel = document.createElement('span');
+    pageLabel.textContent = `Pagina ${currentPage} de ${totalPages}`;
+
+    const nextButton = document.createElement('button');
+    nextButton.type = 'button';
+    nextButton.className = 'secondary';
+    nextButton.textContent = 'Siguiente';
+    nextButton.disabled = currentPage >= totalPages;
+    nextButton.addEventListener('click', () => {
+      simpleListPages[config.key] = Math.min(totalPages, currentPage + 1);
+      renderSimpleListPagination(config);
+    });
+
+    config.pagination.append(prevButton, pageLabel, nextButton);
+  }
+
+  function filterClients() {
+    renderSimpleListPagination({
+      key: 'clients',
+      search: clientListSearch,
+      count: clientListCount,
+      pagination: clientListPagination,
+      empty: document.querySelector('[data-client-empty]'),
+      rowSelector: '[data-client-row]',
+      searchDataset: 'clientSearch',
+      label: 'registrado(s)'
+    });
+  }
+
+  function filterCategories() {
+    renderSimpleListPagination({
+      key: 'categories',
+      search: categoryListSearch,
+      count: categoryListCount,
+      pagination: categoryListPagination,
+      empty: document.querySelector('[data-category-empty]'),
+      rowSelector: '[data-category-row]',
+      searchDataset: 'categorySearch',
+      label: 'categoria(s)'
+    });
+  }
+
+  function filterProviders() {
+    renderSimpleListPagination({
+      key: 'providers',
+      search: providerSearch,
+      count: providerCount,
+      pagination: providerListPagination,
+      empty: document.querySelector('[data-provider-empty]'),
+      rowSelector: '[data-provider-row]',
+      searchDataset: 'providerSearch',
+      label: 'registrado(s)'
+    });
   }
 
   function setModalCategoryWarning(message = '') {
@@ -4009,7 +4501,7 @@ include 'partials/header.php';
     document.getElementById('ventaTipo').value = 'unidad';
     document.getElementById('ventaCantidad').value = 1;
     document.getElementById('saleMethod').value = 'efectivo';
-    saleForm.querySelector('textarea[name="observacion"]').value = '';
+    saleForm.querySelector('[name="observacion"]').value = '';
     renderCart(saleCart, 'saleCartList', 'saleCartInputs');
     updateSaleTotal();
   }
@@ -4035,7 +4527,7 @@ include 'partials/header.php';
     document.getElementById('purchaseQuantity').value = 1;
     document.getElementById('purchasePrice').value = '0';
     document.getElementById('purchaseMethod').value = 'efectivo';
-    purchaseForm.querySelector('textarea[name="observacion"]').value = '';
+    purchaseForm.querySelector('[name="observacion"]').value = '';
     renderPurchaseCart();
     updatePurchaseTotal();
   }
@@ -4062,7 +4554,7 @@ include 'partials/header.php';
     }
 
     document.getElementById('purchaseMethod').value = purchase.metodo || 'efectivo';
-    purchaseForm.querySelector('textarea[name="observacion"]').value = purchase.observacion || '';
+    purchaseForm.querySelector('[name="observacion"]').value = purchase.observacion || '';
     purchaseCart = details
       .map((item) => {
         const product = products.find((productItem) => Number(productItem.id) === Number(item.producto_id));
@@ -4123,7 +4615,7 @@ include 'partials/header.php';
     }
 
     document.getElementById('saleMethod').value = sale.metodo || 'efectivo';
-    saleForm.querySelector('textarea[name="observacion"]').value = sale.observacion || '';
+    saleForm.querySelector('[name="observacion"]').value = sale.observacion || '';
     saleCart = details
       .map((item) => {
         const product = products.find((productItem) => Number(productItem.id) === Number(item.producto_id));
@@ -4193,7 +4685,21 @@ include 'partials/header.php';
     button.addEventListener('click', () => openDeleteProviderModal(button.dataset.deleteProvider));
   });
 
-  providerSearch?.addEventListener('input', filterProviders);
+  clientListSearch?.addEventListener('input', () => {
+    simpleListPages.clients = 1;
+    filterClients();
+  });
+  categoryListSearch?.addEventListener('input', () => {
+    simpleListPages.categories = 1;
+    filterCategories();
+  });
+  providerSearch?.addEventListener('input', () => {
+    simpleListPages.providers = 1;
+    filterProviders();
+  });
+  filterClients();
+  filterCategories();
+  filterProviders();
 
   document.querySelectorAll('[data-edit-category]').forEach((button) => {
     button.addEventListener('click', () => openCategoryModal(button.dataset.editCategory, button.dataset.categoryName, 'edit'));
@@ -4214,7 +4720,7 @@ include 'partials/header.php';
     });
   });
 
-  ['editCanchaId', 'editHoraInicio', 'editHoraFin'].forEach((id) => {
+  ['editCanchaId', 'editHoraInicioHour', 'editHoraFinHour'].forEach((id) => {
     document.getElementById(id)?.addEventListener('change', updateEditReservationPrice);
   });
 
@@ -4226,6 +4732,41 @@ include 'partials/header.php';
       : 'reservado';
   });
 
+  document.getElementById('reservationForm')?.addEventListener('submit', (event) => {
+    const clientInput = document.getElementById('clientSearch');
+    const clientId = document.getElementById('modalClienteId')?.value || '';
+    const paymentInput = document.getElementById('modalMontoPago');
+    const paymentAmount = Number(moneyDigits(paymentInput?.value || 0) || 0);
+
+    clientInput?.setCustomValidity(clientId ? '' : 'Selecciona un cliente de la lista.');
+    paymentInput?.setCustomValidity(paymentAmount > 0 && paymentAmount < 20000 ? 'El abono minimo es 20.000.' : '');
+
+    if (!clientId) {
+      event.preventDefault();
+      clientInput?.reportValidity();
+      return;
+    }
+
+    if (paymentAmount > 0 && paymentAmount < 20000) {
+      event.preventDefault();
+      paymentInput?.reportValidity();
+    }
+  });
+
+  document.getElementById('reservationEditForm')?.addEventListener('submit', (event) => {
+    syncEditHours();
+    const form = event.currentTarget;
+    const status = document.getElementById('editEstado')?.value || '';
+    const balance = Number(form.dataset.saldo || 0);
+
+    if (status === 'finalizado' && balance > 0) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      document.getElementById('editEstado').value = form.dataset.estadoOriginal || 'confirmado';
+      showClientMessage(`No se puede finalizar la reserva porque todavia tiene saldo pendiente de ${money(balance)}.`);
+    }
+  });
+
   document.getElementById('modalComprobantePago')?.addEventListener('change', (event) => {
     if (event.currentTarget.files.length > 0) {
       document.getElementById('modalReservaMetodo').value = 'transferencia';
@@ -4234,6 +4775,37 @@ include 'partials/header.php';
 
   document.getElementById('modalReservationDuration')?.addEventListener('change', (event) => {
     syncReservationDuration(event.currentTarget.value);
+  });
+
+  document.getElementById('reservationPaymentForm')?.addEventListener('submit', (event) => {
+    const form = event.currentTarget;
+    const updateMethodOnly = form.querySelector('[name="actualizar_metodo_pago"]')?.value === '1';
+    if (updateMethodOnly) {
+      return;
+    }
+
+    const amount = Number(moneyDigits(form.querySelector('[name="monto"]')?.value || 0));
+    const balance = Number(form.dataset.saldo || 0);
+
+    if (amount <= 0) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showClientMessage('Ingresa un monto valido.');
+      return;
+    }
+
+    if (balance <= 0) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showClientMessage('Esta reserva ya esta pagada completamente. No se puede registrar otro pago.');
+      return;
+    }
+
+    if (amount > balance) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showClientMessage('El monto supera el saldo pendiente de la reserva.');
+    }
   });
 
   document.querySelectorAll('form').forEach((form) => {
@@ -4271,6 +4843,7 @@ include 'partials/header.php';
 
   clientSearch?.addEventListener('input', () => {
     modalClienteId.value = '';
+    clientSearch.setCustomValidity(clientSearch.value.trim() === '' ? '' : 'Selecciona un cliente de la lista.');
     renderClientSuggestions(clientSearch.value);
   });
 
@@ -4290,6 +4863,27 @@ include 'partials/header.php';
 
   purchaseProviderSearch?.addEventListener('focus', () => renderProviderSuggestions(purchaseProviderSearch.value));
 
+  productProviderSearch?.addEventListener('input', () => {
+    productProviderId.value = '';
+    renderProviderSuggestions(productProviderSearch.value, productProviderSuggestions, selectProductProvider);
+  });
+
+  productProviderSearch?.addEventListener('focus', () => renderProviderSuggestions(productProviderSearch.value, productProviderSuggestions, selectProductProvider));
+
+  quickProductProviderSearch?.addEventListener('input', () => {
+    quickProductProviderId.value = '';
+    renderProviderSuggestions(quickProductProviderSearch.value, quickProductProviderSuggestions, selectQuickProductProvider);
+  });
+
+  quickProductProviderSearch?.addEventListener('focus', () => renderProviderSuggestions(quickProductProviderSearch.value, quickProductProviderSuggestions, selectQuickProductProvider));
+
+  editProductoProveedorSearch?.addEventListener('input', () => {
+    editProductoProveedorId.value = '';
+    renderProviderSuggestions(editProductoProveedorSearch.value, editProductoProveedorSuggestions, selectEditProductProvider);
+  });
+
+  editProductoProveedorSearch?.addEventListener('focus', () => renderProviderSuggestions(editProductoProveedorSearch.value, editProductoProveedorSuggestions, selectEditProductProvider));
+
   ventaProductoSearch?.addEventListener('input', () => {
     selectedSaleProduct = null;
     ventaProductoId.value = '';
@@ -4298,6 +4892,18 @@ include 'partials/header.php';
   });
 
   ventaProductoSearch?.addEventListener('focus', () => renderProductSuggestions(ventaProductoSearch.value));
+
+  document.getElementById('openSaleProductSearch')?.addEventListener('click', () => {
+    if (saleProductSearchModalInput) {
+      saleProductSearchModalInput.value = ventaProductoSearch?.value || '';
+    }
+    renderSaleProductSearchModal();
+    saleProductSearchModal?.classList.add('open');
+    saleProductSearchModal?.setAttribute('aria-hidden', 'false');
+    setTimeout(() => saleProductSearchModalInput?.focus(), 0);
+  });
+
+  saleProductSearchModalInput?.addEventListener('input', renderSaleProductSearchModal);
 
   ventaProductoSearch?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') {
@@ -4325,6 +4931,7 @@ include 'partials/header.php';
     selectedPurchaseProduct = null;
     purchaseProductId.value = '';
     renderPurchaseProductSuggestions(purchaseProductSearch.value);
+    updatePurchasePriceForType();
     updatePurchaseTotal();
   });
 
@@ -4379,22 +4986,79 @@ include 'partials/header.php';
     document.querySelector('#quickClientForm input[name="nombre"]').focus();
   });
 
-  document.getElementById('openQuickProvider')?.addEventListener('click', () => {
+  function providerSearchForTarget(target) {
+    if (target === 'product') return productProviderSearch;
+    if (target === 'quickProduct') return quickProductProviderSearch;
+    if (target === 'editProduct') return editProductoProveedorSearch;
+    return purchaseProviderSearch;
+  }
+
+  function openQuickProviderModal(target = 'purchase') {
+    quickProviderTarget = target;
     purchaseProviderSuggestions.innerHTML = '';
     purchaseProviderSuggestions.classList.remove('open');
+    productProviderSuggestions?.classList.remove('open');
+    quickProductProviderSuggestions?.classList.remove('open');
+    editProductoProveedorSuggestions?.classList.remove('open');
+    const targetSearch = providerSearchForTarget(target);
+    document.getElementById('quickProviderName').value = capitalizeFirstLetter(targetSearch?.value.trim() || '');
     quickProviderModal.classList.add('open');
     quickProviderModal.setAttribute('aria-hidden', 'false');
     document.querySelector('#quickProviderForm input[name="nombre"]').focus();
+  }
+
+  document.getElementById('openQuickProvider')?.addEventListener('click', () => {
+    openQuickProviderModal('purchase');
   });
+
+  document.querySelectorAll('[data-open-quick-provider]').forEach((button) => {
+    button.addEventListener('click', () => openQuickProviderModal(button.dataset.openQuickProvider || 'purchase'));
+  });
+
+  function purchaseQuickProductStock() {
+    const quantity = Math.max(1, Number(document.getElementById('purchaseQuantity')?.value || 1));
+    const type = document.getElementById('purchaseType')?.value || 'unidad';
+    const packQuantity = Math.max(0, Number(quickProductPackQuantity?.value || 0));
+    return type === 'pack' && packQuantity > 0 ? quantity * packQuantity : quantity;
+  }
+
+  function syncQuickProductFromPurchase() {
+    if (!quickProductOpenedFromPurchase) {
+      return;
+    }
+
+    if (quickProductStock) {
+      quickProductStock.value = String(purchaseQuickProductStock());
+    }
+  }
+
+  function applyQuickProductStockToPurchaseQuantity(stockInicial) {
+    const quantityInput = document.getElementById('purchaseQuantity');
+    if (!quantityInput) {
+      return;
+    }
+
+    quantityInput.value = String(Math.max(1, Number(stockInicial || 1)));
+    updatePurchaseTotal();
+  }
 
   document.getElementById('openQuickProduct')?.addEventListener('click', () => {
     purchaseProductSuggestions.innerHTML = '';
     purchaseProductSuggestions.classList.remove('open');
-    document.getElementById('quickProductName').value = capitalizeFirstLetter(purchaseProductSearch.value.trim());
-    document.getElementById('quickProductCompra').value = document.getElementById('purchasePrice')?.value || '0';
+    quickProductOpenedFromPurchase = true;
+    quickProductName.value = capitalizeFirstLetter(purchaseProductSearch.value.trim());
+    quickProductCompra.value = document.getElementById('purchasePrice')?.value || '0';
+    const purchaseProvider = providers.find((provider) => Number(provider.id) === Number(purchaseProviderId?.value || 0));
+    if (purchaseProvider) {
+      selectQuickProductProvider(purchaseProvider);
+    } else {
+      quickProductProviderId.value = '';
+      quickProductProviderSearch.value = '';
+    }
+    syncQuickProductFromPurchase();
     quickProductModal.classList.add('open');
     quickProductModal.setAttribute('aria-hidden', 'false');
-    document.getElementById('quickProductName').focus();
+    quickProductName.focus();
   });
 
   document.addEventListener('click', (event) => {
@@ -4405,6 +5069,12 @@ include 'partials/header.php';
       saleClientSuggestions.classList.remove('open');
       purchaseProviderSuggestions.innerHTML = '';
       purchaseProviderSuggestions.classList.remove('open');
+      productProviderSuggestions.innerHTML = '';
+      productProviderSuggestions.classList.remove('open');
+      quickProductProviderSuggestions.innerHTML = '';
+      quickProductProviderSuggestions.classList.remove('open');
+      editProductoProveedorSuggestions.innerHTML = '';
+      editProductoProveedorSuggestions.classList.remove('open');
     }
 
     if (!event.target.closest('.product-picker')) {
@@ -4517,6 +5187,7 @@ include 'partials/header.php';
 
   document.querySelectorAll('[data-close-quick-product]').forEach((button) => {
     button.addEventListener('click', () => {
+      quickProductOpenedFromPurchase = false;
       quickProductModal.classList.remove('open');
       quickProductModal.setAttribute('aria-hidden', 'true');
     });
@@ -4574,10 +5245,19 @@ include 'partials/header.php';
     if (!providers.some((provider) => Number(provider.id) === Number(data.proveedor.id))) {
       providers.push(data.proveedor);
     }
-    selectPurchaseProvider(data.proveedor);
+    if (quickProviderTarget === 'product') {
+      selectProductProvider(data.proveedor);
+    } else if (quickProviderTarget === 'quickProduct') {
+      selectQuickProductProvider(data.proveedor);
+    } else if (quickProviderTarget === 'editProduct') {
+      selectEditProductProvider(data.proveedor);
+    } else {
+      selectPurchaseProvider(data.proveedor);
+    }
     if (data.existe && data.mensaje) {
       showClientMessage(data.mensaje);
     }
+    quickProviderTarget = 'purchase';
     form.reset();
     quickProviderModal.classList.remove('open');
     quickProviderModal.setAttribute('aria-hidden', 'true');
@@ -4586,10 +5266,35 @@ include 'partials/header.php';
   document.getElementById('quickProductForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    let quickPurchaseStock = 0;
+    if (quickProductOpenedFromPurchase) {
+      const nombre = String(form.querySelector('[name="nombre"]')?.value || '').trim();
+      const precioCompra = Number(moneyDigits(form.querySelector('[name="precio_compra"]')?.value || '0') || 0);
+      const stockInicial = Number(form.querySelector('[name="stock"]')?.value || 0);
+      quickPurchaseStock = stockInicial;
+
+      if (nombre === '') {
+        showClientMessage('Ingresa el nombre del producto.');
+        return;
+      }
+      if (precioCompra <= 0) {
+        showClientMessage('Ingresa el precio de compra del producto.');
+        return;
+      }
+      if (stockInicial <= 0) {
+        showClientMessage('Ingresa una cantidad de stock valida para el producto.');
+        return;
+      }
+    }
+
     prepareMoneyInputs(form);
+    const productFormData = new FormData(form);
+    if (quickProductOpenedFromPurchase) {
+      productFormData.append('origen', 'compra');
+    }
     const response = await fetch('guardar_producto_rapido.php', {
       method: 'POST',
-      body: new FormData(form)
+      body: productFormData
     });
     const data = await response.json();
 
@@ -4598,16 +5303,26 @@ include 'partials/header.php';
       return;
     }
 
+    const stockLoadedFromQuickPurchase = quickProductOpenedFromPurchase && !data.existe;
+    if (stockLoadedFromQuickPurchase) {
+      data.producto.stock_ya_cargado = 1;
+    }
+
     const existingIndex = products.findIndex((product) => Number(product.id) === Number(data.producto.id));
     if (existingIndex >= 0) {
       products[existingIndex] = data.producto;
     } else {
       products.push(data.producto);
     }
+    renderProductInventorySearch(true);
     selectPurchaseProduct(data.producto);
+    if (stockLoadedFromQuickPurchase) {
+      applyQuickProductStockToPurchaseQuantity(quickPurchaseStock || data.producto.stock);
+    }
     if (data.existe && data.mensaje) {
       showClientMessage(data.mensaje);
     }
+    quickProductOpenedFromPurchase = false;
     form.reset();
     form.querySelectorAll('.money-input').forEach((input) => {
       input.value = '0';
@@ -4650,7 +5365,7 @@ include 'partials/header.php';
     const packPrice = Number(selectedSaleProduct?.precio_pack || 0);
     const packQuantity = Number(selectedSaleProduct?.pack_cantidad || 0);
     const price = isPack ? packPrice : unitPrice;
-    const amount = Number(quantity.value || 0);
+    const amount = clampSaleQuantity('sale');
     total.value = money(price * amount);
     saleType.setCustomValidity(selectedSaleProduct && isPack && (packPrice <= 0 || packQuantity <= 0) ? 'Este producto no tiene pack configurado.' : '');
   }
@@ -4662,6 +5377,39 @@ include 'partials/header.php';
     if (!quantity || !price || !total) return;
 
     total.value = money(Number(quantity.value || 0) * Number(moneyDigits(price.value) || 0));
+  }
+
+  function updatePurchasePriceForType() {
+    const typeInput = document.getElementById('purchaseType');
+    const priceInput = document.getElementById('purchasePrice');
+    const packOption = document.getElementById('purchaseTypePack');
+    if (!typeInput || !priceInput) {
+      return;
+    }
+
+    if (!selectedPurchaseProduct) {
+      if (packOption) {
+        packOption.disabled = false;
+        packOption.textContent = 'Pack';
+      }
+      return;
+    }
+
+    const unitCost = Number(selectedPurchaseProduct.precio_compra || 0);
+    const packQuantity = Number(selectedPurchaseProduct.pack_cantidad || 0);
+    const packAllowed = packQuantity > 0;
+    if (packOption) {
+      packOption.disabled = !packAllowed;
+      packOption.textContent = packAllowed ? 'Pack' : 'Pack (no disponible)';
+    }
+    if (!packAllowed && typeInput.value === 'pack') {
+      typeInput.value = 'unidad';
+    }
+
+    const nextPrice = typeInput.value === 'pack'
+      ? unitCost * packQuantity
+      : unitCost;
+    priceInput.value = money(nextPrice);
   }
 
   function addPurchaseItem() {
@@ -4684,7 +5432,8 @@ include 'partials/header.php';
       return;
     }
 
-    const existing = purchaseCart.find((item) => Number(item.product.id) === Number(selectedPurchaseProduct.id) && item.type === type && Number(item.price) === price);
+    const stockAlreadyLoaded = Number(selectedPurchaseProduct.stock_ya_cargado || 0) === 1;
+    const existing = purchaseCart.find((item) => Number(item.product.id) === Number(selectedPurchaseProduct.id) && item.type === type && Number(item.price) === price && Boolean(item.stockAlreadyLoaded) === stockAlreadyLoaded);
     const units = type === 'pack' ? quantity * Number(selectedPurchaseProduct.pack_cantidad || 0) : quantity;
     if (existing) {
       existing.quantity += quantity;
@@ -4697,7 +5446,8 @@ include 'partials/header.php';
         quantity,
         units,
         price,
-        subtotal: price * quantity
+        subtotal: price * quantity,
+        stockAlreadyLoaded
       });
     }
 
@@ -4707,6 +5457,7 @@ include 'partials/header.php';
     document.getElementById('purchaseType').value = 'unidad';
     quantityInput.value = 1;
     priceInput.value = '0';
+    updatePurchasePriceForType();
     renderPurchaseCart();
     updatePurchaseTotal();
   }
@@ -4720,13 +5471,17 @@ include 'partials/header.php';
   function openSaleCheckoutModal() {
     const total = cartTotal(saleCart);
     checkoutTotal.textContent = money(total);
+    checkoutMethod.value = document.getElementById('saleMethod')?.value || 'efectivo';
     checkoutReceived.value = money(total);
     checkoutPrintTicket.checked = false;
     updateCheckoutChange();
     saleCheckoutModal.classList.add('open');
     saleCheckoutModal.setAttribute('aria-hidden', 'false');
-    checkoutReceived.focus();
-    checkoutReceived.select();
+    requestAnimationFrame(() => {
+      checkoutReceived.focus();
+      checkoutReceived.setSelectionRange(0, checkoutReceived.value.length);
+      checkoutReceived.select();
+    });
   }
 
   function saleTicketHtml(options = null) {
@@ -4741,16 +5496,25 @@ include 'partials/header.php';
         product: item.product.nombre,
         type: item.type,
         quantity: item.quantity,
+        price: cartItemUnitPrice(item),
         subtotal: item.subtotal
       }))
     };
-    const rows = ticketData.items.map((item) => `
-      <tr>
-        <td>${escapeHtml(item.product)} (${escapeHtml(item.type)})</td>
-        <td>${item.quantity}</td>
-        <td>${money(item.subtotal)}</td>
-      </tr>
-    `).join('');
+    const itemCount = ticketData.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+    const rows = ticketData.items.map((item) => {
+      const quantity = Number(item.quantity || 0);
+      const price = item.price !== undefined
+        ? Number(item.price || 0)
+        : (quantity > 0 ? Number(item.subtotal || 0) / quantity : 0);
+      return `
+        <tr>
+          <td>${escapeHtml(item.product)} (${escapeHtml(item.type)})</td>
+          <td>${quantity}</td>
+          <td>${money(price)}</td>
+          <td>${money(item.subtotal)}</td>
+        </tr>
+      `;
+    }).join('');
 
     return `
       <!doctype html>
@@ -4759,12 +5523,13 @@ include 'partials/header.php';
         <meta charset="utf-8">
         <title>Ticket de venta</title>
         <style>
-          body { font-family: Arial, sans-serif; width: 280px; margin: 0; padding: 12px; color: #111; }
+          body { font-family: Arial, sans-serif; width: 300px; margin: 0; padding: 12px; color: #111; }
           h1 { font-size: 16px; margin: 0 0 8px; text-align: center; }
           p { margin: 4px 0; font-size: 12px; }
-          table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 12px; }
+          table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; }
           th, td { border-bottom: 1px dashed #999; padding: 4px 0; text-align: left; }
-          th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: right; }
+          th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4) { text-align: right; }
+          .items-count { border-top: 1px solid #111; padding-top: 8px; font-weight: 700; }
           .total { font-size: 15px; font-weight: 700; border-top: 1px solid #111; padding-top: 8px; }
         </style>
       </head>
@@ -4774,12 +5539,11 @@ include 'partials/header.php';
         <p>Cliente: ${escapeHtml(ticketData.client)}</p>
         <p>Metodo: ${escapeHtml(ticketData.method)}</p>
         <table>
-          <thead><tr><th>Producto</th><th>Cant.</th><th>Subt.</th></tr></thead>
+          <thead><tr><th>Producto</th><th>Cant.</th><th>Precio</th><th>Subt.</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
+        <p class="items-count">Items: ${itemCount}</p>
         <p class="total">Total: ${money(ticketData.total)}</p>
-        <p>Recibido: ${money(ticketData.received ?? ticketData.total)}</p>
-        <p>Vuelto: ${money(ticketData.change ?? 0)}</p>
       </body>
       </html>
     `;
@@ -4799,24 +5563,17 @@ include 'partials/header.php';
     return true;
   }
 
-  function cashCloseTicketHtml() {
-    const efectivoContado = Number(moneyDigits(cashCloseForm?.querySelector('[name="monto_cierre_efectivo"]')?.value || '0') || 0);
-    const transferenciaContada = Number(moneyDigits(cashCloseForm?.querySelector('[name="monto_cierre_transferencia"]')?.value || '0') || 0);
-    const cierreFecha = new Date().toLocaleString('es-PY');
-    const movimientos = cashTicketData.movimientos || [];
-    const rows = movimientos.map((item) => {
-      const sign = item.tipo === 'egreso' ? '-' : (item.tipo === 'ingreso' ? '+' : '');
-      const time = item.fecha ? new Date(String(item.fecha).replace(' ', 'T')).toLocaleTimeString('es-PY', { hour: '2-digit', minute: '2-digit' }) : '';
-      const detail = item.detalle ? `<br><small>${escapeHtml(item.detalle)}</small>` : '';
-      return `
-        <tr>
-          <td>${escapeHtml(time)}</td>
-          <td>${escapeHtml(item.tipo)}</td>
-          <td>${escapeHtml(item.concepto)}${detail}</td>
-          <td>${sign}${money(item.monto)}</td>
-        </tr>
-      `;
-    }).join('');
+  function cashCloseTicketHtml(ticketData = cashTicketData) {
+    const efectivoContado = ticketData.monto_cierre_efectivo !== undefined
+      ? Number(ticketData.monto_cierre_efectivo || 0)
+      : Number(moneyDigits(cashCloseForm?.querySelector('[name="monto_cierre_efectivo"]')?.value || '0') || 0);
+    const transferenciaContada = ticketData.monto_cierre_transferencia !== undefined
+      ? Number(ticketData.monto_cierre_transferencia || 0)
+      : Number(moneyDigits(cashCloseForm?.querySelector('[name="monto_cierre_transferencia"]')?.value || '0') || 0);
+    const cierreFecha = ticketData.cerrada_en || new Date().toLocaleString('es-PY');
+    const diferenciaEfectivo = efectivoContado - Number(ticketData.saldo_efectivo || 0);
+    const diferenciaTransferencia = transferenciaContada - Number(ticketData.saldo_transferencia || 0);
+    const diferenciaTotal = (efectivoContado + transferenciaContada) - Number(ticketData.saldo_total || 0);
 
     return `
       <!doctype html>
@@ -4828,39 +5585,37 @@ include 'partials/header.php';
           body { font-family: Arial, sans-serif; width: 300px; margin: 0; padding: 12px; color: #111; }
           h1 { font-size: 16px; margin: 0 0 8px; text-align: center; }
           p { margin: 4px 0; font-size: 12px; }
-          table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; }
-          th, td { border-bottom: 1px dashed #999; padding: 4px 0; text-align: left; vertical-align: top; }
-          th:last-child, td:last-child { text-align: right; }
-          small { color: #444; }
+          .difference { font-weight: 700; }
+          .negative { color: #b91c1c; }
+          .positive { color: #166534; }
           .total { font-size: 14px; font-weight: 700; border-top: 1px solid #111; padding-top: 8px; }
         </style>
       </head>
       <body>
         <h1>Cierre de caja</h1>
-        <p>Apertura: ${escapeHtml(cashTicketData.abierta_en || '-')}</p>
+        <p>Apertura: ${escapeHtml(ticketData.abierta_en || '-')}</p>
         <p>Cierre: ${escapeHtml(cierreFecha)}</p>
-        <p>Monto inicial: ${money(cashTicketData.monto_inicial)}</p>
-        <p>Saldo esperado: ${money(cashTicketData.saldo_total)}</p>
+        <p>Monto inicial: ${money(ticketData.monto_inicial)}</p>
+        <p>Saldo esperado: ${money(ticketData.saldo_total)}</p>
         <p>Efectivo contado: ${money(efectivoContado)}</p>
+        <p class="difference ${diferenciaEfectivo < 0 ? 'negative' : 'positive'}">Dif. efectivo: ${money(diferenciaEfectivo)}</p>
         <p>Transferencia contada: ${money(transferenciaContada)}</p>
+        <p class="difference ${diferenciaTransferencia < 0 ? 'negative' : 'positive'}">Dif. transferencia: ${money(diferenciaTransferencia)}</p>
         <p class="total">Total contado: ${money(efectivoContado + transferenciaContada)}</p>
-        <table>
-          <thead><tr><th>Hora</th><th>Tipo</th><th>Concepto</th><th>Monto</th></tr></thead>
-          <tbody>${rows || '<tr><td colspan="4">Sin movimientos</td></tr>'}</tbody>
-        </table>
+        <p class="difference ${diferenciaTotal < 0 ? 'negative' : 'positive'}">Diferencia total: ${money(diferenciaTotal)}</p>
       </body>
       </html>
     `;
   }
 
-  function printCashCloseTicket() {
+  function printCashCloseTicket(ticketData = cashTicketData) {
     const ticket = window.open('', 'ticket_caja', 'width=380,height=700');
     if (!ticket) {
       showClientMessage('El navegador bloqueo la ventana de impresion. Permite ventanas emergentes para imprimir el ticket.');
       return false;
     }
 
-    ticket.document.write(cashCloseTicketHtml());
+    ticket.document.write(cashCloseTicketHtml(ticketData));
     ticket.document.close();
     ticket.focus();
     ticket.print();
@@ -4984,14 +5739,44 @@ include 'partials/header.php';
     const packPrice = Number(selectedReservationSaleProduct?.precio_pack || 0);
     const packQuantity = Number(selectedReservationSaleProduct?.pack_cantidad || 0);
     const price = isPack ? packPrice : unitPrice;
-    const amount = Number(quantity.value || 0);
+    const amount = clampSaleQuantity('reservation');
     total.value = money(price * amount);
     saleType.setCustomValidity(selectedReservationSaleProduct && isPack && (packPrice <= 0 || packQuantity <= 0) ? 'Este producto no tiene pack configurado.' : '');
   }
 
   document.getElementById('ventaTipo')?.addEventListener('change', updateSaleTotal);
   document.getElementById('ventaCantidad')?.addEventListener('input', updateSaleTotal);
+  document.querySelectorAll('[data-sale-quantity-step]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const quantityInput = document.getElementById('ventaCantidad');
+      if (!quantityInput) {
+        return;
+      }
+
+      const step = Number(button.dataset.saleQuantityStep || 0);
+      const current = Number(quantityInput.value || 0);
+      quantityInput.value = String(current + step);
+      updateSaleTotal();
+    });
+  });
+  document.getElementById('purchaseType')?.addEventListener('change', () => {
+    updatePurchasePriceForType();
+    updatePurchaseTotal();
+  });
   document.getElementById('purchaseQuantity')?.addEventListener('input', updatePurchaseTotal);
+  document.querySelectorAll('[data-purchase-quantity-step]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const quantityInput = document.getElementById('purchaseQuantity');
+      if (!quantityInput) {
+        return;
+      }
+
+      const step = Number(button.dataset.purchaseQuantityStep || 0);
+      const current = Number(quantityInput.value || 0);
+      quantityInput.value = String(Math.max(1, current + step));
+      updatePurchaseTotal();
+    });
+  });
   document.getElementById('purchasePrice')?.addEventListener('input', (event) => {
     formatMoneyInput(event.currentTarget);
     updatePurchaseTotal();
@@ -5115,17 +5900,34 @@ include 'partials/header.php';
     cashCloseForm.submit();
   });
 
+  document.querySelectorAll('[data-reprint-cash-ticket]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const ticketData = cashClosedTickets[button.dataset.reprintCashTicket];
+      if (!ticketData) {
+        showClientMessage('No se encontraron los datos de este cierre para reimprimir.');
+        return;
+      }
+      printCashCloseTicket(ticketData);
+    });
+  });
+
   checkoutReceived?.addEventListener('input', () => {
     formatMoneyInput(checkoutReceived);
     updateCheckoutChange();
   });
 
-  document.getElementById('confirmSaleSubmit')?.addEventListener('click', () => {
+  document.getElementById('confirmSaleSubmit')?.addEventListener('click', (event) => {
+    if (saleForm?.dataset.submitting === '1') {
+      return;
+    }
+
+    document.getElementById('saleMethod').value = checkoutMethod.value || 'efectivo';
     if (checkoutPrintTicket.checked && !printSaleTicket()) {
       return;
     }
 
     saleSubmitConfirmed = true;
+    lockSubmitForm(saleForm, event.currentTarget);
     prepareMoneyInputs(saleForm);
     saleForm.submit();
   });
@@ -5157,13 +5959,12 @@ include 'partials/header.php';
       client: sale.cliente || 'Sin cliente',
       method: sale.metodo,
       total: Number(sale.total || 0),
-      received: Number(sale.total || 0),
-      change: 0,
       date: new Date(sale.fecha_venta).toLocaleString('es-PY'),
       items: details.map((item) => ({
         product: item.producto,
         type: item.tipo_venta,
         quantity: Number(item.cantidad),
+        price: Number(item.precio_unitario || 0),
         subtotal: Number(item.subtotal)
       }))
     });
@@ -5249,6 +6050,7 @@ include 'partials/header.php';
       <tr>
         <td>${escapeHtml(product.nombre)}</td>
         <td>${escapeHtml(product.codigo_barra || '-')}</td>
+        <td>${escapeHtml(product.proveedor || '-')}</td>
         <td>${escapeHtml(product.categoria || '-')}</td>
         <td>${money(product.precio_compra)}</td>
         <td>${money(product.precio_venta)}</td>
@@ -5269,10 +6071,10 @@ include 'partials/header.php';
     `;
   }
 
-  function renderProductInventorySearch() {
+  function renderProductInventorySearch(forceCurrent = false) {
     if (!productInventoryRows || !productInventorySearch) return;
     const term = productInventorySearch.value.trim().toLowerCase();
-    if (term === '') {
+    if (term === '' && !forceCurrent) {
       productInventoryRows.innerHTML = initialProductInventoryRows;
       productInventoryCount.textContent = initialProductInventoryCount;
       if (productInventoryPagination) {
@@ -5283,10 +6085,12 @@ include 'partials/header.php';
       });
       return;
     }
-    const matches = products.filter((product) => `${product.nombre} ${product.codigo_barra || ''} ${product.categoria || ''} ${product.estado || ''}`.toLowerCase().includes(term));
+    const matches = term === ''
+      ? products
+      : products.filter((product) => `${product.nombre} ${product.codigo_barra || ''} ${product.proveedor || ''} ${product.categoria || ''} ${product.estado || ''}`.toLowerCase().includes(term));
     productInventoryRows.innerHTML = matches.length
       ? matches.map(productInventoryRow).join('')
-      : '<tr><td colspan="9">No se encontraron productos con esa busqueda.</td></tr>';
+      : '<tr><td colspan="10">No se encontraron productos con esa busqueda.</td></tr>';
     productInventoryCount.textContent = `${matches.length} producto(s)${term ? ' encontrados' : ''}`;
     if (productInventoryPagination) {
       productInventoryPagination.hidden = true;
@@ -5414,13 +6218,25 @@ include 'partials/header.php';
     toggleEditPassword.textContent = visible ? 'Ver' : 'Ocultar';
   });
 
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || event.defaultPrevented || !shouldProtectSubmit(form)) {
+      return;
+    }
+
+    lockSubmitForm(form, event.submitter);
+  });
+
   const initialHash = location.hash.replace('#', '');
-  const initialModule = initialHash === 'ventas-list'
+  const initialModule = initialHash === 'dashboard'
+    ? 'caja'
+    : (initialHash === 'ventas-list'
     ? 'ventas'
-    : (initialHash === 'productos-list' ? 'productos' : (initialHash === 'compras-list' ? 'compras' : (initialHash || 'dashboard')));
+    : (initialHash === 'productos-list' ? 'productos' : (initialHash === 'compras-list' ? 'compras' : (initialHash || 'caja'))));
   if (document.getElementById(initialModule)) {
     showModule(initialModule);
   }
+  document.documentElement.classList.remove('app-loading');
   clearTransientUrlParams();
 
   renderCourtTabs();

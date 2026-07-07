@@ -10,12 +10,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 $nombre = trim($_POST['nombre'] ?? '');
 $codigoBarra = trim($_POST['codigo_barra'] ?? '');
+$proveedorId = (int)($_POST['proveedor_id'] ?? 0);
 $categoria = trim($_POST['categoria'] ?? '');
 $precioCompra = leerMonto($_POST['precio_compra'] ?? 0);
 $precioVenta = leerMonto($_POST['precio_venta'] ?? 0);
 $packCantidad = (int)($_POST['pack_cantidad'] ?? 0);
 $precioPack = leerMonto($_POST['precio_pack'] ?? 0);
 $stock = (int)($_POST['stock'] ?? 0);
+$origen = $_POST['origen'] ?? '';
 
 if ($nombre === '') {
     echo json_encode(['ok' => false, 'error' => 'El nombre del producto es obligatorio.']);
@@ -27,7 +29,13 @@ if ($precioCompra < 0 || $precioVenta < 0 || $packCantidad < 0 || $precioPack < 
     exit;
 }
 
+if ($origen === 'compra' && ($precioCompra <= 0 || $stock <= 0)) {
+    echo json_encode(['ok' => false, 'error' => 'Para cargar desde compras, ingresa precio de compra y stock inicial validos.']);
+    exit;
+}
+
 $pdo = conectarDB();
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFTER categoria");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -39,12 +47,33 @@ $pdo->exec(
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
 
-$stmt = $pdo->prepare('SELECT * FROM productos WHERE LOWER(TRIM(nombre)) = LOWER(TRIM(?)) LIMIT 1');
+if ($proveedorId > 0) {
+    $stmt = $pdo->prepare('SELECT id FROM proveedores WHERE id = ?');
+    $stmt->execute([$proveedorId]);
+    if (!$stmt->fetch()) {
+        echo json_encode(['ok' => false, 'error' => 'Proveedor no encontrado.']);
+        exit;
+    }
+}
+
+$stmt = $pdo->prepare(
+    'SELECT p.*, pv.nombre AS proveedor
+     FROM productos p
+     LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
+     WHERE LOWER(TRIM(p.nombre)) = LOWER(TRIM(?))
+     LIMIT 1'
+);
 $stmt->execute([$nombre]);
 $productoExistente = $stmt->fetch();
 
 if (!$productoExistente && $codigoBarra !== '') {
-    $stmt = $pdo->prepare('SELECT * FROM productos WHERE codigo_barra = ? LIMIT 1');
+    $stmt = $pdo->prepare(
+        'SELECT p.*, pv.nombre AS proveedor
+         FROM productos p
+         LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
+         WHERE p.codigo_barra = ?
+         LIMIT 1'
+    );
     $stmt->execute([$codigoBarra]);
     $productoExistente = $stmt->fetch();
 }
@@ -78,12 +107,13 @@ if ($categoria !== '') {
 }
 
 $stmt = $pdo->prepare(
-    'INSERT INTO productos (nombre, codigo_barra, categoria, precio_compra, precio_venta, pack_cantidad, precio_pack, stock)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO productos (nombre, codigo_barra, proveedor_id, categoria, precio_compra, precio_venta, pack_cantidad, precio_pack, stock)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 $stmt->execute([
     $nombre,
     $codigoBarra ?: null,
+    $proveedorId > 0 ? $proveedorId : null,
     $categoria ?: null,
     $precioCompra,
     $precioVenta,
@@ -93,7 +123,12 @@ $stmt->execute([
 ]);
 
 $id = (int)$pdo->lastInsertId();
-$stmt = $pdo->prepare('SELECT * FROM productos WHERE id = ?');
+$stmt = $pdo->prepare(
+    'SELECT p.*, pv.nombre AS proveedor
+     FROM productos p
+     LEFT JOIN proveedores pv ON pv.id = p.proveedor_id
+     WHERE p.id = ?'
+);
 $stmt->execute([$id]);
 
 echo json_encode([

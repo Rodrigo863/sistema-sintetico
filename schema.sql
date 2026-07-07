@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS pagos (
   id INT AUTO_INCREMENT PRIMARY KEY,
   reserva_id INT NOT NULL,
   monto DECIMAL(10,2) NOT NULL,
-  metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'efectivo',
+  metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
   concepto ENUM('sena', 'saldo', 'total', 'extra') NOT NULL DEFAULT 'sena',
   fecha_pago DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   observacion TEXT DEFAULT NULL,
@@ -84,13 +84,15 @@ CREATE TABLE IF NOT EXISTS productos (
   nombre VARCHAR(120) NOT NULL,
   codigo_barra VARCHAR(80) DEFAULT NULL,
   categoria VARCHAR(80) DEFAULT NULL,
+  proveedor_id INT DEFAULT NULL,
   precio_compra DECIMAL(10,2) NOT NULL DEFAULT 0,
   precio_venta DECIMAL(10,2) NOT NULL DEFAULT 0,
   pack_cantidad INT NOT NULL DEFAULT 0,
   precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0,
   stock INT NOT NULL DEFAULT 0,
   estado ENUM('activo', 'inactivo') NOT NULL DEFAULT 'activo',
-  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_productos_proveedor FOREIGN KEY (proveedor_id) REFERENCES proveedores(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS producto_categorias (
@@ -107,7 +109,7 @@ CREATE TABLE IF NOT EXISTS ventas (
   reserva_id INT DEFAULT NULL,
   cliente_id INT DEFAULT NULL,
   total DECIMAL(10,2) NOT NULL DEFAULT 0,
-  metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'efectivo',
+  metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
   estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa',
   fecha_venta DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   observacion TEXT DEFAULT NULL,
@@ -119,7 +121,7 @@ CREATE TABLE IF NOT EXISTS compras (
   id INT AUTO_INCREMENT PRIMARY KEY,
   proveedor_id INT DEFAULT NULL,
   total DECIMAL(10,2) NOT NULL DEFAULT 0,
-  metodo ENUM('efectivo', 'transferencia', 'tarjeta', 'otro') NOT NULL DEFAULT 'efectivo',
+  metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
   estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa',
   fecha_compra DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   observacion TEXT DEFAULT NULL,
@@ -162,6 +164,7 @@ ALTER TABLE clientes MODIFY email VARCHAR(100) DEFAULT NULL;
 ALTER TABLE clientes MODIFY telefono VARCHAR(30) NOT NULL;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER categoria;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS codigo_barra VARCHAR(80) DEFAULT NULL AFTER nombre;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFTER categoria;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS pack_cantidad INT NOT NULL DEFAULT 0 AFTER precio_venta;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cliente_id INT DEFAULT NULL AFTER reserva_id;

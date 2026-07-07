@@ -80,7 +80,7 @@ if ($montoPago > 0 && $montoPago < 20000) {
     volverConErrorReserva('El abono minimo es 20.000.');
 }
 
-if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
     $metodo = 'efectivo';
 }
 

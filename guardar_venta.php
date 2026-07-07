@@ -47,7 +47,7 @@ $origen = $_POST['origen'] ?? 'ventas';
 $metodo = $_POST['metodo'] ?? 'efectivo';
 $observacion = trim($_POST['observacion'] ?? '');
 
-if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
     $metodo = 'efectivo';
 }
 
@@ -104,10 +104,12 @@ if (!$stmt->fetch()) {
     volverVenta('Debes abrir la caja antes de registrar ventas o consumos.');
 }
 
+$pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
+
 $pdo->beginTransaction();
 
 if ($reservaId > 0) {
-    $stmt = $pdo->prepare('SELECT id, cliente_id FROM reservas WHERE id = ?');
+    $stmt = $pdo->prepare('SELECT id, cliente_id, estado FROM reservas WHERE id = ?');
     $stmt->execute([$reservaId]);
     $reserva = $stmt->fetch();
 
@@ -202,7 +204,6 @@ $stmt->execute([
 ]);
 $ventaId = (int)$pdo->lastInsertId();
 
-$pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
 $stmtDetalle = $pdo->prepare(
     'INSERT INTO venta_detalles (venta_id, producto_id, tipo_venta, cantidad, unidades_descontadas, precio_unitario, costo_unitario, subtotal)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -223,6 +224,11 @@ foreach ($detalles as $detalle) {
 $stmtStock = $pdo->prepare('UPDATE productos SET stock = stock - ? WHERE id = ?');
 foreach ($usoStock as $productoId => $unidadesDescontadas) {
     $stmtStock->execute([$unidadesDescontadas, $productoId]);
+}
+
+if ($reservaId > 0 && ($reserva['estado'] ?? '') === 'finalizado') {
+    $stmt = $pdo->prepare("UPDATE reservas SET estado = 'confirmado' WHERE id = ? AND estado = 'finalizado'");
+    $stmt->execute([$reservaId]);
 }
 
 $pdo->commit();

@@ -48,7 +48,7 @@ $clienteId = (int)($_POST['cliente_id'] ?? 0);
 $metodo = $_POST['metodo'] ?? 'efectivo';
 $observacion = trim($_POST['observacion'] ?? '');
 
-if (!in_array($metodo, ['efectivo', 'transferencia', 'tarjeta', 'otro'], true)) {
+if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
     $metodo = 'efectivo';
 }
 

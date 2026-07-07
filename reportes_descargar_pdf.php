@@ -44,21 +44,19 @@ final class ReportePdf
         }
 
         $this->content = '';
-        $this->y = 32;
-        $this->text(28, $this->y, $this->titulo, 16, true);
+        $this->y = 30;
+        $this->centerText($this->y, $this->titulo, 18, true);
+        $this->y += 24;
+        $this->text(28, $this->y, $this->subtitulo, 10);
         $this->y += 16;
-        $this->text(28, $this->y, $this->subtitulo, 9);
-        $this->y += 18;
-        $this->line(28, $this->y, 814, $this->y);
-        $this->y += 14;
     }
 
     public function section(string $titulo): void
     {
-        $this->ensureSpace(24);
-        $this->y += 4;
+        $this->ensureSpace(30);
+        $this->y += 8;
         $this->text(28, $this->y, $titulo, 12, true);
-        $this->y += 12;
+        $this->y += 14;
     }
 
     public function summary(array $items): void
@@ -80,14 +78,15 @@ final class ReportePdf
         $x = 28;
         $headerY = $this->y;
         foreach ($columns as $column) {
-            $this->rect($x, $headerY, $column['w'], 16, true);
-            $this->text($x + 3, $headerY + 11, $column['label'], 7, true);
+            $this->rect($x, $headerY, $column['w'], 18, true);
+            $this->text($x + 4, $headerY + 12, $column['label'], (int)($column['header_size'] ?? 8), true);
             $x += $column['w'];
         }
-        $this->y += 16;
+        $this->y += 18;
 
         if (empty($rows)) {
             $this->row($columns, [['text' => 'Sin datos para el rango seleccionado.', 'colspan' => count($columns)]]);
+            $this->y += 8;
             return;
         }
 
@@ -100,14 +99,14 @@ final class ReportePdf
 
     private function row(array $columns, array $row): void
     {
-        $this->ensureSpace(17);
+        $this->ensureSpace(20);
         $x = 28;
-        $rowHeight = 16;
+        $rowHeight = 20;
 
         if (isset($row[0]['colspan'])) {
             $totalWidth = array_sum(array_column($columns, 'w'));
             $this->rect(28, $this->y, $totalWidth, $rowHeight);
-            $this->tableText(31, $this->y + 11, $row[0]['text'], 6.5);
+            $this->tableText(31, $this->y + 13, $row[0]['text'], 8, true);
             $this->y += $rowHeight;
             return;
         }
@@ -115,7 +114,7 @@ final class ReportePdf
         foreach ($columns as $i => $column) {
             $value = (string)($row[$i] ?? '');
             $this->rect($x, $this->y, $column['w'], $rowHeight);
-            $fontSize = (float)($column['font_size'] ?? 6.2);
+            $fontSize = (float)($column['font_size'] ?? 8);
             $charWidth = $fontSize * 0.58;
             $maxChars = max(5, (int)floor(($column['w'] - 6) / $charWidth));
             if (strlen($value) > $maxChars) {
@@ -123,7 +122,7 @@ final class ReportePdf
             }
             $align = $column['align'] ?? 'left';
             $textX = $align === 'right' ? $x + $column['w'] - 3 - (strlen($value) * $charWidth) : $x + 3;
-            $this->tableText(max($x + 3, $textX), $this->y + 11, $value, $fontSize);
+            $this->tableText(max($x + 3, $textX), $this->y + 13, $value, $fontSize, true);
             $x += $column['w'];
         }
 
@@ -144,10 +143,17 @@ final class ReportePdf
         $this->content .= "0 0 0 rg BT /{$font} {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
     }
 
-    private function tableText(float $x, float $y, string $text, float $size = 6.2): void
+    private function centerText(float $y, string $text, int $size = 9, bool $bold = false): void
     {
+        $estimatedWidth = strlen($text) * $size * 0.52;
+        $this->text(max(28, ($this->w - $estimatedWidth) / 2), $y, $text, $size, $bold);
+    }
+
+    private function tableText(float $x, float $y, string $text, float $size = 6.2, bool $bold = false): void
+    {
+        $font = $bold ? 'F2' : 'F1';
         $pdfY = $this->h - $y;
-        $this->content .= "0 0 0 rg BT /F3 {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
+        $this->content .= "0 0 0 rg BT /{$font} {$size} Tf 1 0 0 1 {$x} {$pdfY} Tm (" . textoPdf($text) . ") Tj ET\n";
     }
 
     private function line(float $x1, float $y1, float $x2, float $y2): void
@@ -265,39 +271,39 @@ $totalPagosReservas = array_sum(array_map(static fn(array $fila): float => (floa
 $reservasCobradas = count(array_unique(array_map(static fn(array $fila): int => (int)$fila['reserva_id'], $pagosDetalle)));
 $tituloRango = date('d/m/Y', strtotime($reporteDesde)) . ' al ' . date('d/m/Y', strtotime($reporteHasta));
 
-$pdf = new ReportePdf('Reporte detallado', 'Sistema de reservas - generado ' . date('d/m/Y H:i') . ' - rango ' . $tituloRango);
-$pdf->summary([
-    ['Total ventas', formatearGuaranies($resumenVentas['total_ventas'] ?? 0)],
-    ['Costo ventas', formatearGuaranies($costoVentas)],
-    ['Ganancia ventas', formatearGuaranies($gananciaVentas)],
-    ['Ingresos reservas', formatearGuaranies($totalPagosReservas)],
-]);
+function gsPdf(float|int|string|null $valor): string
+{
+    return 'Gs. ' . formatearGuaranies($valor);
+}
 
-$pdf->section('Detalle de ventas y ganancia');
+$pdf = new ReportePdf('Reporte de Ganancias Detallado', 'Rango: ' . $tituloRango . ' - generado ' . date('d/m/Y H:i'));
 $pdf->table(
     [
-        ['label' => 'Fecha', 'w' => 72], ['label' => 'Venta', 'w' => 34], ['label' => 'Cliente/Reserva', 'w' => 112],
-        ['label' => 'Producto', 'w' => 110], ['label' => 'Tipo', 'w' => 38], ['label' => 'Cant.', 'w' => 36, 'align' => 'right'],
-        ['label' => 'Unid.', 'w' => 36, 'align' => 'right'], ['label' => 'P. venta', 'w' => 56, 'align' => 'right'],
-        ['label' => 'Subtotal', 'w' => 58, 'align' => 'right'], ['label' => 'Costo unit.', 'w' => 64, 'align' => 'right'],
-        ['label' => 'Costo', 'w' => 58, 'align' => 'right'], ['label' => 'Ganancia', 'w' => 62, 'align' => 'right'],
+        ['label' => 'Ref', 'w' => 44],
+        ['label' => 'Fecha', 'w' => 88],
+        ['label' => 'Cliente', 'w' => 86],
+        ['label' => 'Detalle', 'w' => 190],
+        ['label' => 'Cant', 'w' => 34, 'align' => 'right'],
+        ['label' => 'Venta', 'w' => 84, 'align' => 'right'],
+        ['label' => 'Costo', 'w' => 84, 'align' => 'right'],
+        ['label' => 'Margen', 'w' => 84, 'align' => 'right'],
     ],
-    array_map(static function (array $fila): array {
+    array_merge(array_map(static function (array $fila): array {
         return [
+            'V#' . $fila['venta_id'],
             date('d/m/Y H:i', strtotime($fila['fecha_venta'])),
-            '#' . $fila['venta_id'],
-            $fila['cliente'] . ($fila['reserva_id'] ? ' / R#' . $fila['reserva_id'] . ' ' . $fila['cancha'] : ' / directa'),
-            $fila['producto'],
-            $fila['tipo_venta'],
+            $fila['cliente'],
+            $fila['producto'] . ' (' . $fila['tipo_venta'] . ')',
             (string)(int)$fila['cantidad'],
-            (string)(int)$fila['unidades_descontadas'],
-            formatearGuaranies($fila['precio_unitario']),
-            formatearGuaranies($fila['subtotal']),
-            formatearGuaranies($fila['costo_unitario']),
-            formatearGuaranies($fila['costo_total']),
-            formatearGuaranies($fila['ganancia']),
+            gsPdf($fila['subtotal']),
+            gsPdf($fila['costo_total']),
+            gsPdf($fila['ganancia']),
         ];
-    }, $ventasDetalle)
+    }, $ventasDetalle), [
+        ['', '', '', 'TOTAL VENTAS', '', '', '', gsPdf($resumenVentas['total_ventas'] ?? 0)],
+        ['', '', '', 'COSTO VENTAS', '', '', '', gsPdf($costoVentas)],
+        ['', '', '', 'GANANCIA NETA', '', '', '', gsPdf($gananciaVentas)],
+    ])
 );
 
 $pdf->section('Pagos de reservas');
