@@ -156,6 +156,41 @@ CREATE TABLE IF NOT EXISTS ventas (
   CONSTRAINT fk_ventas_cliente FOREIGN KEY (cliente_id) REFERENCES clientes(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS empresa_configuracion (
+  id TINYINT UNSIGNED NOT NULL PRIMARY KEY DEFAULT 1,
+  razon_social VARCHAR(160) DEFAULT NULL,
+  nombre_fantasia VARCHAR(160) DEFAULT NULL,
+  ruc VARCHAR(20) DEFAULT NULL,
+  actividad_economica VARCHAR(180) DEFAULT NULL,
+  direccion VARCHAR(220) DEFAULT NULL,
+  telefono VARCHAR(40) DEFAULT NULL,
+  email VARCHAR(120) DEFAULT NULL,
+  modalidad_facturacion ENUM('pendiente', 'autoimpresor', 'ekuatia', 'ekuatia_i') NOT NULL DEFAULT 'pendiente',
+  ancho_papel_mm ENUM('58', '80') NOT NULL DEFAULT '80',
+  actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS comprobante_numeraciones (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  empresa_id TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  tipo_documento ENUM('factura') NOT NULL DEFAULT 'factura',
+  timbrado VARCHAR(20) DEFAULT NULL,
+  establecimiento CHAR(3) DEFAULT NULL,
+  punto_expedicion CHAR(3) DEFAULT NULL,
+  numero_desde INT NOT NULL DEFAULT 1,
+  numero_hasta INT NOT NULL DEFAULT 9999999,
+  ultimo_numero INT NOT NULL DEFAULT 0,
+  vigencia_desde DATE DEFAULT NULL,
+  vigencia_hasta DATE DEFAULT NULL,
+  estado ENUM('pendiente', 'activo', 'inactivo') NOT NULL DEFAULT 'pendiente',
+  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_numeracion_empresa FOREIGN KEY (empresa_id) REFERENCES empresa_configuracion(id),
+  UNIQUE KEY uq_numeracion_fiscal (empresa_id, tipo_documento, timbrado, establecimiento, punto_expedicion)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT IGNORE INTO empresa_configuracion (id) VALUES (1);
+
 CREATE TABLE IF NOT EXISTS compras (
   id INT AUTO_INCREMENT PRIMARY KEY,
   proveedor_id INT DEFAULT NULL,

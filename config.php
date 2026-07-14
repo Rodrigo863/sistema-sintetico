@@ -236,6 +236,7 @@ $rutasSoloAdministrador = [
     'guardar_producto.php', 'guardar_producto_rapido.php', 'editar_producto.php', 'eliminar_producto.php', 'cambiar_estado_producto.php',
     'guardar_compra.php', 'editar_compra.php', 'anular_compra.php',
     'reportes_pdf.php', 'reportes_descargar_pdf.php',
+    'guardar_configuracion_facturacion.php',
 ];
 
 if (in_array($archivoActual, $rutasSoloAdministrador, true)) {

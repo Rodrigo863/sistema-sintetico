@@ -11,6 +11,42 @@ $pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS promocion_cantidad IN
 $pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_promocion DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER promocion_cantidad");
 $pdo->exec("ALTER TABLE venta_detalles MODIFY tipo_venta ENUM('unidad', 'pack', 'promocion') NOT NULL DEFAULT 'unidad'");
 $pdo->exec(
+    "CREATE TABLE IF NOT EXISTS empresa_configuracion (
+      id TINYINT UNSIGNED NOT NULL PRIMARY KEY DEFAULT 1,
+      razon_social VARCHAR(160) DEFAULT NULL,
+      nombre_fantasia VARCHAR(160) DEFAULT NULL,
+      ruc VARCHAR(20) DEFAULT NULL,
+      actividad_economica VARCHAR(180) DEFAULT NULL,
+      direccion VARCHAR(220) DEFAULT NULL,
+      telefono VARCHAR(40) DEFAULT NULL,
+      email VARCHAR(120) DEFAULT NULL,
+      modalidad_facturacion ENUM('pendiente', 'autoimpresor', 'ekuatia', 'ekuatia_i') NOT NULL DEFAULT 'pendiente',
+      ancho_papel_mm ENUM('58', '80') NOT NULL DEFAULT '80',
+      actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+);
+$pdo->exec("INSERT IGNORE INTO empresa_configuracion (id) VALUES (1)");
+$pdo->exec(
+    "CREATE TABLE IF NOT EXISTS comprobante_numeraciones (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      empresa_id TINYINT UNSIGNED NOT NULL DEFAULT 1,
+      tipo_documento ENUM('factura') NOT NULL DEFAULT 'factura',
+      timbrado VARCHAR(20) DEFAULT NULL,
+      establecimiento CHAR(3) DEFAULT NULL,
+      punto_expedicion CHAR(3) DEFAULT NULL,
+      numero_desde INT NOT NULL DEFAULT 1,
+      numero_hasta INT NOT NULL DEFAULT 9999999,
+      ultimo_numero INT NOT NULL DEFAULT 0,
+      vigencia_desde DATE DEFAULT NULL,
+      vigencia_hasta DATE DEFAULT NULL,
+      estado ENUM('pendiente', 'activo', 'inactivo') NOT NULL DEFAULT 'pendiente',
+      creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+      CONSTRAINT fk_numeracion_empresa FOREIGN KEY (empresa_id) REFERENCES empresa_configuracion(id),
+      UNIQUE KEY uq_numeracion_fiscal (empresa_id, tipo_documento, timbrado, establecimiento, punto_expedicion)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+);
+$pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
       id INT AUTO_INCREMENT PRIMARY KEY,
       nombre VARCHAR(80) NOT NULL,
@@ -155,6 +191,26 @@ $categoriasActivas = array_values(array_filter($categorias, fn($categoria) => $c
 $usuariosSistema = $esAdministrador
     ? $pdo->query("SELECT id, nombre, usuario, rol, estado, ultimo_acceso, creado_en FROM usuarios ORDER BY estado ASC, nombre ASC")->fetchAll()
     : [];
+$empresaConfiguracion = $pdo->query("SELECT * FROM empresa_configuracion WHERE id = 1")->fetch() ?: [];
+$numeracionFactura = $pdo->query(
+    "SELECT * FROM comprobante_numeraciones
+     WHERE empresa_id = 1 AND tipo_documento = 'factura'
+     ORDER BY (estado = 'activo') DESC, id DESC
+     LIMIT 1"
+)->fetch() ?: [];
+$facturacionLista = ($empresaConfiguracion['razon_social'] ?? '') !== ''
+    && ($empresaConfiguracion['ruc'] ?? '') !== ''
+    && ($empresaConfiguracion['direccion'] ?? '') !== ''
+    && ($empresaConfiguracion['modalidad_facturacion'] ?? 'pendiente') !== 'pendiente'
+    && ($numeracionFactura['timbrado'] ?? '') !== ''
+    && ($numeracionFactura['establecimiento'] ?? '') !== ''
+    && ($numeracionFactura['punto_expedicion'] ?? '') !== ''
+    && !empty($numeracionFactura['vigencia_desde'])
+    && !empty($numeracionFactura['vigencia_hasta'])
+    && ($numeracionFactura['estado'] ?? 'pendiente') === 'activo'
+    && (int)($numeracionFactura['ultimo_numero'] ?? 0) < (int)($numeracionFactura['numero_hasta'] ?? 0);
+$facturacionMensaje = trim($_GET['facturacion_mensaje'] ?? '');
+$facturacionError = trim($_GET['facturacion_error'] ?? '');
 $usuarioMensaje = trim($_GET['usuario_mensaje'] ?? '');
 $usuarioError = trim($_GET['usuario_error'] ?? '');
 
@@ -1793,6 +1849,72 @@ include 'partials/header.php';
 
   <?php if ($esAdministrador): ?>
   <section class="module" id="configuracion">
+    <article class="panel billing-settings-panel">
+      <div class="section-header">
+        <div>
+          <h2>Facturaci&oacute;n</h2>
+          <span class="muted">Datos preparados para una futura impresi&oacute;n fiscal en ticketera.</span>
+        </div>
+        <span class="badge <?= $facturacionLista ? 'activa' : 'reservado' ?>"><?= $facturacionLista ? 'Configuraci&oacute;n lista' : 'Configuraci&oacute;n pendiente' ?></span>
+      </div>
+
+      <?php if ($facturacionMensaje !== ''): ?>
+        <div class="notice success"><?= e($facturacionMensaje) ?></div>
+      <?php endif; ?>
+      <?php if ($facturacionError !== ''): ?>
+        <div class="notice error"><?= e($facturacionError) ?></div>
+      <?php endif; ?>
+
+      <div class="notice info">
+        Guardar estos datos no habilita todav&iacute;a la emisi&oacute;n fiscal. La opci&oacute;n Factura permanecer&aacute; desactivada hasta implementar y validar el formato autorizado por la DNIT.
+      </div>
+
+      <form action="guardar_configuracion_facturacion.php" method="post" class="grid compact billing-settings-form">
+        <label>Modalidad
+          <select name="modalidad_facturacion">
+            <?php $modalidadActual = $empresaConfiguracion['modalidad_facturacion'] ?? 'pendiente'; ?>
+            <option value="pendiente" <?= $modalidadActual === 'pendiente' ? 'selected' : '' ?>>Por definir</option>
+            <option value="autoimpresor" <?= $modalidadActual === 'autoimpresor' ? 'selected' : '' ?>>Autoimpresor</option>
+            <option value="ekuatia_i" <?= $modalidadActual === 'ekuatia_i' ? 'selected' : '' ?>>e-Kuatia'i</option>
+            <option value="ekuatia" <?= $modalidadActual === 'ekuatia' ? 'selected' : '' ?>>e-Kuatia</option>
+          </select>
+        </label>
+        <label>Ancho de papel
+          <select name="ancho_papel_mm">
+            <option value="80" <?= ($empresaConfiguracion['ancho_papel_mm'] ?? '80') === '80' ? 'selected' : '' ?>>80 mm</option>
+            <option value="58" <?= ($empresaConfiguracion['ancho_papel_mm'] ?? '80') === '58' ? 'selected' : '' ?>>58 mm</option>
+          </select>
+        </label>
+        <label>Raz&oacute;n social <input type="text" name="razon_social" maxlength="160" value="<?= e($empresaConfiguracion['razon_social'] ?? '') ?>"></label>
+        <label>Nombre de fantas&iacute;a <input type="text" name="nombre_fantasia" maxlength="160" value="<?= e($empresaConfiguracion['nombre_fantasia'] ?? '') ?>"></label>
+        <label>RUC <input type="text" name="ruc" maxlength="20" inputmode="numeric" pattern="[0-9-]*" value="<?= e($empresaConfiguracion['ruc'] ?? '') ?>"></label>
+        <label>Actividad econ&oacute;mica <input type="text" name="actividad_economica" maxlength="180" value="<?= e($empresaConfiguracion['actividad_economica'] ?? '') ?>"></label>
+        <label>Direcci&oacute;n <input type="text" name="direccion" maxlength="220" value="<?= e($empresaConfiguracion['direccion'] ?? '') ?>"></label>
+        <label>Tel&eacute;fono <input type="text" name="telefono" maxlength="40" value="<?= e($empresaConfiguracion['telefono'] ?? '') ?>"></label>
+        <label>Email <input type="email" name="email" maxlength="120" value="<?= e($empresaConfiguracion['email'] ?? '') ?>"></label>
+
+        <div class="billing-settings-divider"><strong>Timbrado y numeraci&oacute;n</strong><span>Completar cuando la DNIT entregue la autorizaci&oacute;n.</span></div>
+        <input type="hidden" name="numeracion_id" value="<?= (int)($numeracionFactura['id'] ?? 0) ?>">
+        <label>N&uacute;mero de timbrado <input type="text" name="timbrado" maxlength="20" inputmode="numeric" pattern="[0-9]*" value="<?= e($numeracionFactura['timbrado'] ?? '') ?>"></label>
+        <label>Establecimiento <input type="text" name="establecimiento" maxlength="3" inputmode="numeric" pattern="[0-9]{3}" placeholder="001" value="<?= e($numeracionFactura['establecimiento'] ?? '') ?>"></label>
+        <label>Punto de expedici&oacute;n <input type="text" name="punto_expedicion" maxlength="3" inputmode="numeric" pattern="[0-9]{3}" placeholder="001" value="<?= e($numeracionFactura['punto_expedicion'] ?? '') ?>"></label>
+        <label>N&uacute;mero desde <input type="number" name="numero_desde" min="1" max="9999999" value="<?= max(1, (int)($numeracionFactura['numero_desde'] ?? 1)) ?>"></label>
+        <label>N&uacute;mero hasta <input type="number" name="numero_hasta" min="1" max="9999999" value="<?= max(1, (int)($numeracionFactura['numero_hasta'] ?? 9999999)) ?>"></label>
+        <label>Pr&oacute;ximo n&uacute;mero <input type="number" name="proximo_numero" min="1" max="9999999" value="<?= max(1, (int)($numeracionFactura['ultimo_numero'] ?? 0) + 1) ?>"></label>
+        <label>Vigencia desde <input type="date" name="vigencia_desde" value="<?= e($numeracionFactura['vigencia_desde'] ?? '') ?>"></label>
+        <label>Vigencia hasta <input type="date" name="vigencia_hasta" value="<?= e($numeracionFactura['vigencia_hasta'] ?? '') ?>"></label>
+        <label>Estado de numeraci&oacute;n
+          <select name="estado_numeracion">
+            <?php $estadoNumeracion = $numeracionFactura['estado'] ?? 'pendiente'; ?>
+            <option value="pendiente" <?= $estadoNumeracion === 'pendiente' ? 'selected' : '' ?>>Pendiente</option>
+            <option value="activo" <?= $estadoNumeracion === 'activo' ? 'selected' : '' ?>>Activo</option>
+            <option value="inactivo" <?= $estadoNumeracion === 'inactivo' ? 'selected' : '' ?>>Inactivo</option>
+          </select>
+        </label>
+        <button type="submit">Guardar facturaci&oacute;n</button>
+      </form>
+    </article>
+
     <article class="panel">
       <div class="section-header">
         <div>
