@@ -3298,9 +3298,10 @@ include 'partials/header.php';
     const promotionWarning = form.querySelector('[data-price-warning="promotion"]');
     if (promotionWarning) {
       const promotionCost = promotionQuantity * unitCost;
-      const isBelowCost = promotionQuantity > 0 && promotionPrice > 0 && promotionCost > 0 && promotionPrice < promotionCost;
-      promotionWarning.hidden = !isBelowCost;
-      promotionWarning.textContent = isBelowCost
+      const promotionLoss = promotionCost - promotionPrice;
+      const hasSignificantLoss = promotionQuantity > 0 && promotionPrice > 0 && promotionCost > 0 && promotionLoss >= 1000;
+      promotionWarning.hidden = !hasSignificantLoss;
+      promotionWarning.textContent = hasSignificantLoss
         ? `Aviso: la promoción vende por debajo del costo en ${money(promotionCost - promotionPrice)}.`
         : '';
     }
