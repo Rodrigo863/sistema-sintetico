@@ -2052,7 +2052,10 @@ include 'partials/header.php';
         <input type="text" name="usuario" required maxlength="60" placeholder="usuario">
       </label>
       <label>Contrase&ntilde;a
-        <input type="password" name="password" required minlength="6" placeholder="M&iacute;nimo 6 caracteres">
+        <div class="password-edit-row">
+          <input type="password" name="password" id="createUserPassword" required minlength="6" placeholder="M&iacute;nimo 6 caracteres">
+          <button type="button" class="secondary" id="toggleCreatePassword">Ver</button>
+        </div>
       </label>
       <label>Rol
         <select name="rol">
@@ -7961,6 +7964,8 @@ include 'partials/header.php';
   const userCreateForm = document.getElementById('userCreateForm');
   const openUserCreateModal = document.getElementById('openUserCreateModal');
   const createUserName = document.getElementById('createUserName');
+  const createUserPassword = document.getElementById('createUserPassword');
+  const toggleCreatePassword = document.getElementById('toggleCreatePassword');
   const userInventorySearch = document.getElementById('userInventorySearch');
   const userInventoryCount = document.getElementById('userInventoryCount');
   const userInventoryRows = document.getElementById('userInventoryRows');
@@ -7976,6 +7981,8 @@ include 'partials/header.php';
 
   openUserCreateModal?.addEventListener('click', () => {
     userCreateForm?.reset();
+    if (createUserPassword) createUserPassword.type = 'password';
+    if (toggleCreatePassword) toggleCreatePassword.textContent = 'Ver';
     userCreateModal?.classList.add('open');
     userCreateModal?.setAttribute('aria-hidden', 'false');
     createUserName?.focus();
@@ -7998,6 +8005,14 @@ include 'partials/header.php';
 
   userInventorySearch?.addEventListener('input', filterUsers);
   userInventorySearch?.addEventListener('search', filterUsers);
+
+  toggleCreatePassword?.addEventListener('click', () => {
+    if (!createUserPassword) return;
+    const visible = createUserPassword.type === 'text';
+    createUserPassword.type = visible ? 'password' : 'text';
+    toggleCreatePassword.textContent = visible ? 'Ver' : 'Ocultar';
+    createUserPassword.focus();
+  });
 
   document.querySelectorAll('[data-edit-user]').forEach((button) => {
     button.addEventListener('click', () => {
