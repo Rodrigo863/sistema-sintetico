@@ -2706,9 +2706,9 @@ include 'partials/header.php';
         <input type="checkbox" id="checkoutPrintTicket">
         Imprimir ticket
       </label>
-      <label class="check-line muted" title="La generacion de facturas se preparara en una proxima etapa">
-        <input type="checkbox" id="checkoutPrintInvoice" disabled>
-        Imprimir factura (pr&oacute;ximamente)
+      <label class="check-line <?= $facturacionLista ? '' : 'muted' ?>" title="Documento exclusivo para probar formato e impresora; no posee validez fiscal">
+        <input type="checkbox" id="checkoutPrintInvoice" <?= $facturacionLista ? '' : 'disabled' ?>>
+        Imprimir factura de prueba (no fiscal)
       </label>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cancelar</button>
@@ -2721,7 +2721,7 @@ include 'partials/header.php';
 <div class="modal-backdrop" id="saleTicketPreviewModal" aria-hidden="true">
   <section class="modal ticket-preview-modal">
     <header class="modal-header">
-      <h2>Vista previa del ticket</h2>
+      <h2 id="salePrintPreviewTitle">Vista previa del ticket</h2>
       <button type="button" class="icon-button" id="closeSaleTicketPreview">&times;</button>
     </header>
     <div class="modal-body">
@@ -3104,6 +3104,23 @@ include 'partials/header.php';
   const purchases = <?= json_encode($todasCompras, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const purchaseDetails = <?= json_encode($compraDetalles, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const cashOpenToday = <?= $cajaAbiertaHoy ? 'true' : 'false' ?>;
+  const provisionalInvoiceConfig = <?= json_encode([
+    'ready' => $facturacionLista,
+    'business_name' => $empresaConfiguracion['razon_social'] ?? '',
+    'trade_name' => $empresaConfiguracion['nombre_fantasia'] ?? '',
+    'ruc' => $empresaConfiguracion['ruc'] ?? '',
+    'activity' => $empresaConfiguracion['actividad_economica'] ?? '',
+    'address' => $empresaConfiguracion['direccion'] ?? '',
+    'phone' => $empresaConfiguracion['telefono'] ?? '',
+    'email' => $empresaConfiguracion['email'] ?? '',
+    'paper_width' => $empresaConfiguracion['ancho_papel_mm'] ?? '80',
+    'stamp' => $numeracionFactura['timbrado'] ?? '',
+    'establishment' => $numeracionFactura['establecimiento'] ?? '',
+    'expedition_point' => $numeracionFactura['punto_expedicion'] ?? '',
+    'next_number' => (int)($numeracionFactura['ultimo_numero'] ?? 0) + 1,
+    'valid_from' => $numeracionFactura['vigencia_desde'] ?? '',
+    'valid_until' => $numeracionFactura['vigencia_hasta'] ?? '',
+  ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const cashTicketData = <?= json_encode([
     'fecha' => $cajaFecha,
     'estado' => $cajaJornada['estado'] ?? 'sin_abrir',
@@ -3189,8 +3206,10 @@ include 'partials/header.php';
   const checkoutReceived = document.getElementById('checkoutReceived');
   const checkoutChange = document.getElementById('checkoutChange');
   const checkoutPrintTicket = document.getElementById('checkoutPrintTicket');
+  const checkoutPrintInvoice = document.getElementById('checkoutPrintInvoice');
   const saleTicketPreviewModal = document.getElementById('saleTicketPreviewModal');
   const saleTicketPreviewFrame = document.getElementById('saleTicketPreviewFrame');
+  const salePrintPreviewTitle = document.getElementById('salePrintPreviewTitle');
   const cashCloseForm = document.getElementById('cashCloseForm');
   const cashCloseConfirmModal = document.getElementById('cashCloseConfirmModal');
   const confirmCashClose = document.getElementById('confirmCashClose');
@@ -7045,6 +7064,7 @@ include 'partials/header.php';
     checkoutMethod.value = document.getElementById('saleMethod')?.value || 'efectivo';
     checkoutReceived.value = money(total);
     checkoutPrintTicket.checked = false;
+    if (checkoutPrintInvoice) checkoutPrintInvoice.checked = false;
     updateCheckoutChange();
     saleCheckoutModal.classList.add('open');
     saleCheckoutModal.setAttribute('aria-hidden', 'false');
@@ -7120,6 +7140,84 @@ include 'partials/header.php';
     `;
   }
 
+  function provisionalSaleInvoiceHtml() {
+    const selectedClient = clients.find((item) => Number(item.id) === Number(saleClienteId?.value || 0))
+      || allClients.find((item) => Number(item.id) === Number(saleClienteId?.value || 0));
+    const paperWidth = Number(provisionalInvoiceConfig.paper_width) === 58 ? 58 : 80;
+    const documentNumber = `${String(provisionalInvoiceConfig.establishment || '001').padStart(3, '0')}-${String(provisionalInvoiceConfig.expedition_point || '001').padStart(3, '0')}-${String(provisionalInvoiceConfig.next_number || 1).padStart(7, '0')}`;
+    const rows = saleCart.map((item) => `
+      <tr>
+        <td>${escapeHtml(item.product.nombre)}<small>${escapeHtml(item.type)}</small></td>
+        <td>${Number(item.quantity || 0)}</td>
+        <td>${money(cartItemUnitPrice(item))}</td>
+        <td>${money(item.subtotal)}</td>
+      </tr>
+    `).join('');
+
+    return `
+      <!doctype html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Factura de prueba ${escapeHtml(documentNumber)}</title>
+        <style>
+          @page { size: ${paperWidth}mm auto; margin: 2mm; }
+          * { box-sizing: border-box; }
+          body { width: ${paperWidth - 4}mm; margin: 0; padding: 1mm; color: #000; font-family: Arial, sans-serif; font-size: 10px; }
+          h1, h2, p { margin: 0; }
+          h1 { font-size: 15px; text-align: center; }
+          h2 { font-size: 12px; text-align: center; margin-top: 2px; }
+          .test-warning { margin: 5px 0; padding: 5px 2px; border: 2px solid #000; text-align: center; font-size: 12px; font-weight: 900; }
+          .company, .document-data, .customer { text-align: center; line-height: 1.35; }
+          .document-data { margin-top: 5px; padding: 4px 0; border-top: 1px dashed #000; border-bottom: 1px dashed #000; }
+          .customer { text-align: left; margin-top: 5px; }
+          table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 9px; }
+          th, td { padding: 3px 1px; border-bottom: 1px dashed #777; vertical-align: top; }
+          th:first-child, td:first-child { text-align: left; }
+          th:not(:first-child), td:not(:first-child) { text-align: right; }
+          td small { display: block; font-size: 8px; text-transform: capitalize; }
+          .total { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; padding-top: 6px; border-top: 2px solid #000; font-size: 15px; font-weight: 900; }
+          .pending-tax { margin-top: 6px; padding: 4px; border: 1px dashed #000; text-align: center; font-weight: 700; }
+          .footer { margin-top: 8px; text-align: center; line-height: 1.35; }
+        </style>
+      </head>
+      <body>
+        <div class="test-warning">DOCUMENTO DE PRUEBA<br>SIN VALIDEZ FISCAL</div>
+        <div class="company">
+          <h1>${escapeHtml(provisionalInvoiceConfig.trade_name || provisionalInvoiceConfig.business_name || 'Empresa de prueba')}</h1>
+          <p>${escapeHtml(provisionalInvoiceConfig.business_name || '')}</p>
+          <p>RUC: ${escapeHtml(provisionalInvoiceConfig.ruc || '-')}</p>
+          <p>${escapeHtml(provisionalInvoiceConfig.activity || '')}</p>
+          <p>${escapeHtml(provisionalInvoiceConfig.address || '')}</p>
+          <p>Tel.: ${escapeHtml(provisionalInvoiceConfig.phone || '-')}</p>
+        </div>
+        <div class="document-data">
+          <h2>FACTURA DE PRUEBA</h2>
+          <p>N.&deg; ${escapeHtml(documentNumber)}</p>
+          <p>Timbrado simulado: ${escapeHtml(provisionalInvoiceConfig.stamp || '-')}</p>
+          <p>Vigencia simulada: ${escapeHtml(provisionalInvoiceConfig.valid_from || '-')} al ${escapeHtml(provisionalInvoiceConfig.valid_until || '-')}</p>
+          <p>Fecha: ${escapeHtml(new Date().toLocaleString('es-PY'))}</p>
+        </div>
+        <div class="customer">
+          <p>Cliente: ${escapeHtml(selectedClient?.nombre || saleClientSearch.value.trim() || 'Sin nombre')}</p>
+          <p>RUC/Documento: ${escapeHtml(selectedClient?.documento || '-')}</p>
+          <p>Condici&oacute;n: Contado &middot; M&eacute;todo: ${escapeHtml(checkoutMethod?.value || 'efectivo')}</p>
+        </div>
+        <table>
+          <thead><tr><th>Descripci&oacute;n</th><th>Cant.</th><th>Precio</th><th>Total</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div class="total"><span>TOTAL Gs.</span><span>${money(cartTotal(saleCart))}</span></div>
+        <div class="pending-tax">IVA y liquidaci&oacute;n fiscal pendientes de parametrizaci&oacute;n.</div>
+        <div class="footer">
+          <strong>IMPRESI&Oacute;N EXCLUSIVA PARA PRUEBA DE TICKETERA</strong>
+          <p>Esta impresi&oacute;n no documenta una operaci&oacute;n fiscal.</p>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
   function printSaleTicket(options = null) {
     const ticket = window.open('', 'ticket_venta', 'width=360,height=620');
     if (!ticket) {
@@ -7141,8 +7239,9 @@ include 'partials/header.php';
     saleForm.submit();
   }
 
-  function openSaleTicketPreview(ticketHtml = saleTicketHtml()) {
+  function openSaleTicketPreview(ticketHtml = saleTicketHtml(), title = 'Vista previa del ticket') {
     saleTicketPreviewFrame.srcdoc = ticketHtml;
+    if (salePrintPreviewTitle) salePrintPreviewTitle.textContent = title;
     saleCheckoutModal.classList.remove('open');
     saleCheckoutModal.setAttribute('aria-hidden', 'true');
     saleTicketPreviewModal.classList.add('open');
@@ -7563,6 +7662,13 @@ include 'partials/header.php';
     updateCheckoutChange();
   });
 
+  checkoutPrintTicket?.addEventListener('change', () => {
+    if (checkoutPrintTicket.checked && checkoutPrintInvoice) checkoutPrintInvoice.checked = false;
+  });
+  checkoutPrintInvoice?.addEventListener('change', () => {
+    if (checkoutPrintInvoice.checked && checkoutPrintTicket) checkoutPrintTicket.checked = false;
+  });
+
   document.getElementById('confirmSaleSubmit')?.addEventListener('click', async (event) => {
     if (saleForm?.dataset.submitting === '1') {
       return;
@@ -7579,9 +7685,11 @@ include 'partials/header.php';
     }
 
     document.getElementById('saleMethod').value = checkoutMethod.value || 'efectivo';
-    if (checkoutPrintTicket.checked) {
+    if (checkoutPrintTicket.checked || checkoutPrintInvoice?.checked) {
       const submitButton = event.currentTarget;
-      const ticketHtml = saleTicketHtml();
+      const isInvoiceTest = Boolean(checkoutPrintInvoice?.checked);
+      const ticketHtml = isInvoiceTest ? provisionalSaleInvoiceHtml() : saleTicketHtml();
+      const previewTitle = isInvoiceTest ? 'Vista previa de factura de prueba' : 'Vista previa del ticket';
       saleForm.dataset.submitting = '1';
       submitButton.disabled = true;
       submitButton.textContent = 'Registrando...';
@@ -7598,7 +7706,7 @@ include 'partials/header.php';
           window.location.href = response.url;
           return;
         }
-        openSaleTicketPreview(ticketHtml);
+        openSaleTicketPreview(ticketHtml, previewTitle);
       } catch (error) {
         saleForm.dataset.submitting = '';
         submitButton.disabled = false;
