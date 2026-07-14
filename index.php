@@ -1927,7 +1927,7 @@ include 'partials/header.php';
     </div>
 
     <div class="settings-panel active" data-settings-panel="usuarios">
-    <article class="panel">
+    <article class="panel" hidden>
       <div class="section-header">
         <div>
           <h2>Configuraci&oacute;n</h2>
@@ -1964,19 +1964,34 @@ include 'partials/header.php';
       </form>
     </article>
 
-    <article class="panel">
-      <div class="section-header">
-        <div>
-          <h2>Usuarios</h2>
-          <span class="muted"><?= count($usuariosSistema) ?> usuario(s) registrado(s)</span>
+    <article class="panel users-panel" id="usuariosList">
+      <div class="section-header users-list-header">
+        <div class="title-actions">
+          <h2>Lista de usuarios</h2>
+          <div class="users-header-actions">
+            <a class="btn small secondary" href="logout.php">Cerrar sesi&oacute;n</a>
+            <button type="button" id="openUserCreateModal">Nuevo usuario</button>
+          </div>
+        </div>
+        <div class="search-form">
+          <input type="search" id="userInventorySearch" placeholder="Buscar nombre, usuario, rol o estado...">
+          <span class="muted" id="userInventoryCount"><?= count($usuariosSistema) ?> usuario(s)</span>
         </div>
       </div>
+
+      <?php if ($usuarioMensaje !== ''): ?>
+        <div class="notice success"><?= e($usuarioMensaje) ?></div>
+      <?php endif; ?>
+      <?php if ($usuarioError !== ''): ?>
+        <div class="notice error"><?= e($usuarioError) ?></div>
+      <?php endif; ?>
+
       <table>
         <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th>&Uacute;ltimo acceso</th><th>Acciones</th></tr></thead>
-        <tbody>
+        <tbody id="userInventoryRows">
           <?php foreach ($usuariosSistema as $usuarioSistema): ?>
             <?php $esUsuarioActual = (int)$usuarioSistema['id'] === (int)(usuarioActual()['id'] ?? 0); ?>
-            <tr>
+            <tr data-user-row data-user-search="<?= e(strtolower(trim(($usuarioSistema['nombre'] ?? '') . ' ' . ($usuarioSistema['usuario'] ?? '') . ' ' . ($usuarioSistema['rol'] ?? '') . ' ' . ($usuarioSistema['estado'] ?? '')))) ?>">
               <td><?= e($usuarioSistema['nombre']) ?></td>
               <td><?= e($usuarioSistema['usuario']) ?></td>
               <td><?= e($usuarioSistema['rol']) ?></td>
@@ -2013,6 +2028,7 @@ include 'partials/header.php';
               </td>
             </tr>
           <?php endforeach; ?>
+          <tr id="userInventoryEmpty" hidden><td colspan="6">No se encontraron usuarios.</td></tr>
         </tbody>
       </table>
     </article>
@@ -2022,6 +2038,36 @@ include 'partials/header.php';
 </main>
 
 <?php if ($esAdministrador): ?>
+<div class="modal-backdrop" id="userCreateModal" aria-hidden="true">
+  <section class="modal">
+    <header class="modal-header">
+      <h2>Nuevo usuario</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="guardar_usuario.php" method="post" class="modal-body" id="userCreateForm">
+      <label>Nombre
+        <input type="text" name="nombre" id="createUserName" required maxlength="120" placeholder="Nombre completo">
+      </label>
+      <label>Usuario
+        <input type="text" name="usuario" required maxlength="60" placeholder="usuario">
+      </label>
+      <label>Contrase&ntilde;a
+        <input type="password" name="password" required minlength="6" placeholder="M&iacute;nimo 6 caracteres">
+      </label>
+      <label>Rol
+        <select name="rol">
+          <option value="secretario">Secretario</option>
+          <option value="administrador">Administrador</option>
+        </select>
+      </label>
+      <div class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit">Guardar usuario</button>
+      </div>
+    </form>
+  </section>
+</div>
+
 <div class="modal-backdrop" id="userEditModal" aria-hidden="true">
   <section class="modal">
     <header class="modal-header">
@@ -7911,6 +7957,14 @@ include 'partials/header.php';
   purchaseListSearch?.addEventListener('search', renderPurchaseListSearch);
   if (purchaseListSearch?.value.trim()) renderPurchaseListSearch();
 
+  const userCreateModal = document.getElementById('userCreateModal');
+  const userCreateForm = document.getElementById('userCreateForm');
+  const openUserCreateModal = document.getElementById('openUserCreateModal');
+  const createUserName = document.getElementById('createUserName');
+  const userInventorySearch = document.getElementById('userInventorySearch');
+  const userInventoryCount = document.getElementById('userInventoryCount');
+  const userInventoryRows = document.getElementById('userInventoryRows');
+  const userInventoryEmpty = document.getElementById('userInventoryEmpty');
   const userEditModal = document.getElementById('userEditModal');
   const editUserId = document.getElementById('editUserId');
   const editUserName = document.getElementById('editUserName');
@@ -7919,6 +7973,31 @@ include 'partials/header.php';
   const editUserRole = document.getElementById('editUserRole');
   const editUserStatus = document.getElementById('editUserStatus');
   const toggleEditPassword = document.getElementById('toggleEditPassword');
+
+  openUserCreateModal?.addEventListener('click', () => {
+    userCreateForm?.reset();
+    userCreateModal?.classList.add('open');
+    userCreateModal?.setAttribute('aria-hidden', 'false');
+    createUserName?.focus();
+  });
+
+  function filterUsers() {
+    if (!userInventoryRows || !userInventorySearch) return;
+    const term = normalizeSearchText(userInventorySearch.value.trim());
+    let visible = 0;
+    userInventoryRows.querySelectorAll('[data-user-row]').forEach((row) => {
+      const matches = normalizeSearchText(row.dataset.userSearch || row.textContent).includes(term);
+      row.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    if (userInventoryEmpty) userInventoryEmpty.hidden = visible !== 0;
+    if (userInventoryCount) {
+      userInventoryCount.textContent = `${visible} usuario(s)${term ? ' encontrados' : ''}`;
+    }
+  }
+
+  userInventorySearch?.addEventListener('input', filterUsers);
+  userInventorySearch?.addEventListener('search', filterUsers);
 
   document.querySelectorAll('[data-edit-user]').forEach((button) => {
     button.addEventListener('click', () => {
