@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS productos (
   pack_cantidad INT NOT NULL DEFAULT 0,
   precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0,
   precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0,
+  promocion_cantidad INT NOT NULL DEFAULT 0,
+  precio_promocion DECIMAL(10,2) NOT NULL DEFAULT 0,
   stock INT NOT NULL DEFAULT 0,
   estado ENUM('activo', 'inactivo') NOT NULL DEFAULT 'activo',
   creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -182,7 +184,7 @@ CREATE TABLE IF NOT EXISTS venta_detalles (
   id INT AUTO_INCREMENT PRIMARY KEY,
   venta_id INT NOT NULL,
   producto_id INT NOT NULL,
-  tipo_venta ENUM('unidad', 'pack') NOT NULL DEFAULT 'unidad',
+  tipo_venta ENUM('unidad', 'pack', 'promocion') NOT NULL DEFAULT 'unidad',
   cantidad INT NOT NULL,
   unidades_descontadas INT NOT NULL DEFAULT 0,
   precio_unitario DECIMAL(10,2) NOT NULL,
@@ -205,12 +207,15 @@ ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFT
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS pack_cantidad INT NOT NULL DEFAULT 0 AFTER precio_venta;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER precio_compra_pack;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS promocion_cantidad INT NOT NULL DEFAULT 0 AFTER precio_pack;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_promocion DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER promocion_cantidad;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cliente_id INT DEFAULT NULL AFTER reserva_id;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa' AFTER metodo;
 ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante_path VARCHAR(255) DEFAULT NULL AFTER observacion;
 ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_apertura_id INT DEFAULT NULL AFTER cerrada_en;
 ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_cierre_id INT DEFAULT NULL AFTER usuario_apertura_id;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS tipo_venta ENUM('unidad', 'pack') NOT NULL DEFAULT 'unidad' AFTER producto_id;
+ALTER TABLE venta_detalles MODIFY tipo_venta ENUM('unidad', 'pack', 'promocion') NOT NULL DEFAULT 'unidad';
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS unidades_descontadas INT NOT NULL DEFAULT 0 AFTER cantidad;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario;
 

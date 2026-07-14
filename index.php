@@ -7,6 +7,9 @@ $pdo->exec("ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'a
 $pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
 $pdo->exec("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante_path VARCHAR(255) DEFAULT NULL AFTER observacion");
 $pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad");
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS promocion_cantidad INT NOT NULL DEFAULT 0 AFTER precio_pack");
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_promocion DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER promocion_cantidad");
+$pdo->exec("ALTER TABLE venta_detalles MODIFY tipo_venta ENUM('unidad', 'pack', 'promocion') NOT NULL DEFAULT 'unidad'");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -827,7 +830,7 @@ $ventaTipo = $_GET['venta_tipo'] ?? 'unidad';
 $ventaMetodo = $_GET['venta_metodo'] ?? 'efectivo';
 $ventaForm = [
     'producto_id' => (int)($_GET['venta_producto_id'] ?? 0),
-    'tipo_venta' => in_array($ventaTipo, ['unidad', 'pack'], true) ? $ventaTipo : 'unidad',
+    'tipo_venta' => in_array($ventaTipo, ['unidad', 'pack', 'promocion'], true) ? $ventaTipo : 'unidad',
     'cantidad' => max(0, (int)($_GET['venta_cantidad'] ?? 1)),
     'metodo' => in_array($ventaMetodo, ['efectivo', 'transferencia'], true) ? $ventaMetodo : 'efectivo',
     'observacion' => trim($_GET['venta_observacion'] ?? ''),
@@ -1494,13 +1497,13 @@ include 'partials/header.php';
       </div>
       <table class="<?= $esAdministrador ? 'products-admin-table' : 'products-readonly-table' ?>">
         <?php if ($esAdministrador): ?>
-          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Venta unidad</th><th>Compra pack</th><th>Venta pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
+          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Venta unidad</th><th>Compra pack</th><th>Venta pack</th><th>Promoci&oacute;n</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
         <?php else: ?>
-          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Venta unidad</th><th>Venta pack</th><th>Stock</th><th>Estado</th></tr></thead>
+          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Venta unidad</th><th>Venta pack</th><th>Promoci&oacute;n</th><th>Stock</th><th>Estado</th></tr></thead>
         <?php endif; ?>
         <tbody id="productInventoryRows">
           <?php if (empty($productosInventario)): ?>
-            <tr><td colspan="<?= $esAdministrador ? 11 : 8 ?>">Todav&iacute;a no hay productos cargados.</td></tr>
+            <tr><td colspan="<?= $esAdministrador ? 12 : 9 ?>">Todav&iacute;a no hay productos cargados.</td></tr>
           <?php else: ?>
             <?php foreach ($productosInventario as $producto): ?>
               <tr data-product-row>
@@ -1524,6 +1527,13 @@ include 'partials/header.php';
                 <td>
                   <?php if ((int)$producto['pack_cantidad'] > 0): ?>
                     <?= (int)$producto['pack_cantidad'] ?> un. / <?= formatearGuaranies($producto['precio_pack']) ?>
+                  <?php else: ?>
+                    -
+                  <?php endif; ?>
+                </td>
+                <td>
+                  <?php if ((int)$producto['promocion_cantidad'] > 0): ?>
+                    <?= (int)$producto['promocion_cantidad'] ?> por <?= formatearGuaranies($producto['precio_promocion']) ?>
                   <?php else: ?>
                     -
                   <?php endif; ?>
@@ -1706,6 +1716,7 @@ include 'partials/header.php';
           <select id="ventaTipo">
             <option value="unidad" <?= $ventaForm['tipo_venta'] === 'unidad' ? 'selected' : '' ?>>Unidad</option>
             <option value="pack" id="ventaTipoPack" <?= $ventaForm['tipo_venta'] === 'pack' ? 'selected' : '' ?>>Pack</option>
+            <option value="promocion" id="ventaTipoPromocion" <?= $ventaForm['tipo_venta'] === 'promocion' ? 'selected' : '' ?>>Promoci&oacute;n</option>
           </select>
         </label>
         <div class="quantity-field">
@@ -2166,6 +2177,8 @@ include 'partials/header.php';
         <label>Unidades por pack <input type="number" name="pack_cantidad" id="quickProductPackQuantity" min="0" step="1" value="0"></label>
         <label>Precio compra pack <input type="text" name="precio_compra_pack" id="quickProductCompraPack" class="money-input" inputmode="numeric" value="0"></label>
         <label>Precio de venta pack <input type="text" name="precio_pack" id="quickProductPackPrecio" class="money-input" inputmode="numeric" value="0"><small class="price-below-cost-warning" data-price-warning="pack" hidden></small></label>
+        <label>Unidades por promoci&oacute;n <input type="number" name="promocion_cantidad" id="quickProductPromoQuantity" min="0" step="1" value="0"></label>
+        <label>Precio promoci&oacute;n <input type="text" name="precio_promocion" id="quickProductPromoPrice" class="money-input" inputmode="numeric" value="0"><small class="price-below-cost-warning" data-price-warning="promotion" hidden></small></label>
         <label>Precio compra unidad <input type="text" name="precio_compra" id="quickProductCompra" class="money-input" inputmode="numeric" value="0" data-positive-money></label>
         <label>Precio de venta unidad <input type="text" name="precio_venta" id="quickProductVenta" class="money-input" inputmode="numeric" value="0" data-positive-money><small class="price-below-cost-warning" data-price-warning="unit" hidden></small></label>
         <label>Stock inicial <input type="number" name="stock" id="quickProductStock" min="0" step="1" value="0"></label>
@@ -2333,6 +2346,8 @@ include 'partials/header.php';
         <label>Unidades por pack <input type="number" name="pack_cantidad" id="editProductoPackCantidad" min="0" step="1" required></label>
         <label>Precio compra pack <input type="text" name="precio_compra_pack" id="editProductoCompraPack" class="money-input" inputmode="numeric" required></label>
         <label>Precio de venta pack <input type="text" name="precio_pack" id="editProductoPackPrecio" class="money-input" inputmode="numeric" required><small class="price-below-cost-warning" data-price-warning="pack" hidden></small></label>
+        <label>Unidades por promoci&oacute;n <input type="number" name="promocion_cantidad" id="editProductoPromoCantidad" min="0" step="1" required></label>
+        <label>Precio promoci&oacute;n <input type="text" name="precio_promocion" id="editProductoPromoPrecio" class="money-input" inputmode="numeric" required><small class="price-below-cost-warning" data-price-warning="promotion" hidden></small></label>
         <label>Precio compra unidad <input type="text" name="precio_compra" id="editProductoCompra" class="money-input" inputmode="numeric" required data-positive-money></label>
         <label>Precio de venta unidad <input type="text" name="precio_venta" id="editProductoVenta" class="money-input" inputmode="numeric" required data-positive-money><small class="price-below-cost-warning" data-price-warning="unit" hidden></small></label>
         <label>Stock <input type="number" name="stock" id="editProductoStock" min="0" step="1" required></label>
@@ -2859,6 +2874,7 @@ include 'partials/header.php';
             <select id="reservaVentaTipo">
               <option value="unidad">Unidad</option>
               <option value="pack" id="reservaVentaTipoPack">Pack</option>
+              <option value="promocion" id="reservaVentaTipoPromocion">Promoci&oacute;n</option>
             </select>
           </label>
           <label>Cantidad <input type="number" id="reservaVentaCantidad" min="1" step="1" value="1"></label>
@@ -3275,6 +3291,19 @@ include 'partials/header.php';
         ? `Aviso: venta menor al costo por ${money(purchaseValue - saleValue)}.`
         : '';
     });
+
+    const promotionQuantity = Number(form.querySelector('[name="promocion_cantidad"]')?.value || 0);
+    const promotionPrice = Number(moneyDigits(form.querySelector('[name="precio_promocion"]')?.value || '0') || 0);
+    const unitCost = Number(moneyDigits(form.querySelector('[name="precio_compra"]')?.value || '0') || 0);
+    const promotionWarning = form.querySelector('[data-price-warning="promotion"]');
+    if (promotionWarning) {
+      const promotionCost = promotionQuantity * unitCost;
+      const isBelowCost = promotionQuantity > 0 && promotionPrice > 0 && promotionCost > 0 && promotionPrice < promotionCost;
+      promotionWarning.hidden = !isBelowCost;
+      promotionWarning.textContent = isBelowCost
+        ? `Aviso: la promoción vende por debajo del costo en ${money(promotionCost - promotionPrice)}.`
+        : '';
+    }
   }
 
   function validateProductRequiredFields(form) {
@@ -3287,8 +3316,10 @@ include 'partials/header.php';
     const packQuantityInput = form.querySelector('[name="pack_cantidad"]');
     const packPurchaseInput = form.querySelector('[name="precio_compra_pack"]');
     const packSaleInput = form.querySelector('[name="precio_pack"]');
+    const promotionQuantityInput = form.querySelector('[name="promocion_cantidad"]');
+    const promotionPriceInput = form.querySelector('[name="precio_promocion"]');
 
-    [categoryInput, unitPurchaseInput, unitSaleInput, packQuantityInput, packPurchaseInput, packSaleInput].forEach((input) => {
+    [categoryInput, unitPurchaseInput, unitSaleInput, packQuantityInput, packPurchaseInput, packSaleInput, promotionQuantityInput, promotionPriceInput].forEach((input) => {
       input?.setCustomValidity('');
     });
 
@@ -3323,6 +3354,17 @@ include 'partials/header.php';
 
     if (packQuantity <= 0 && (packPurchase > 0 || packSale > 0)) {
       packQuantityInput?.setCustomValidity('Ingresa unidades por pack para usar precios por pack.');
+      isValid = false;
+    }
+
+    const promotionQuantity = Number(promotionQuantityInput?.value || 0);
+    const promotionPrice = Number(moneyDigits(promotionPriceInput?.value || '0') || 0);
+    if (promotionQuantity > 0 && promotionPrice <= 0) {
+      promotionPriceInput?.setCustomValidity('Ingresa el precio de la promocion.');
+      isValid = false;
+    }
+    if (promotionQuantity <= 0 && promotionPrice > 0) {
+      promotionQuantityInput?.setCustomValidity('Ingresa las unidades incluidas en la promocion.');
       isValid = false;
     }
 
@@ -3773,15 +3815,15 @@ include 'partials/header.php';
   }
 
   function cartItemUnitPrice(item) {
-    return item.type === 'pack'
-      ? Number(item.product.precio_pack || 0)
-      : Number(item.product.precio_venta || 0);
+    if (item.type === 'pack') return Number(item.product.precio_pack || 0);
+    if (item.type === 'promocion') return Number(item.product.precio_promocion || 0);
+    return Number(item.product.precio_venta || 0);
   }
 
   function cartItemUnits(item, quantity) {
-    return item.type === 'pack'
-      ? quantity * Number(item.product.pack_cantidad || 0)
-      : quantity;
+    if (item.type === 'pack') return quantity * Number(item.product.pack_cantidad || 0);
+    if (item.type === 'promocion') return quantity * Number(item.product.promocion_cantidad || 0);
+    return quantity;
   }
 
   function renderCart(cart, listId, inputsId) {
@@ -3938,10 +3980,10 @@ include 'partials/header.php';
 
   function maxSaleCartQuantity(product, cart, type) {
     const available = availableStock(product, cart);
-    if (type === 'pack') {
-      const packQuantity = Number(product?.pack_cantidad || 0);
-      return packQuantity > 0 ? Math.floor(available / packQuantity) : 0;
-    }
+    const unitsPerItem = type === 'pack'
+      ? Number(product?.pack_cantidad || 0)
+      : (type === 'promocion' ? Number(product?.promocion_cantidad || 0) : 1);
+    if (type !== 'unidad') return unitsPerItem > 0 ? Math.floor(available / unitsPerItem) : 0;
 
     return available;
   }
@@ -3950,12 +3992,17 @@ include 'partials/header.php';
     return Number(product?.pack_cantidad || 0) > 0 && Number(product?.precio_pack || 0) > 0;
   }
 
+  function productAllowsPromotion(product) {
+    return Number(product?.promocion_cantidad || 0) > 0 && Number(product?.precio_promocion || 0) > 0;
+  }
+
   function syncSaleTypeOptions(target = 'sale') {
     const isReservation = target === 'reservation';
     const product = isReservation ? selectedReservationSaleProduct : selectedSaleProduct;
     const typeInput = document.getElementById(isReservation ? 'reservaVentaTipo' : 'ventaTipo');
     const packOption = document.getElementById(isReservation ? 'reservaVentaTipoPack' : 'ventaTipoPack');
-    if (!typeInput || !packOption) {
+    const promotionOption = document.getElementById(isReservation ? 'reservaVentaTipoPromocion' : 'ventaTipoPromocion');
+    if (!typeInput || !packOption || !promotionOption) {
       return;
     }
 
@@ -3963,6 +4010,12 @@ include 'partials/header.php';
     packOption.disabled = !packAllowed;
     packOption.textContent = packAllowed ? 'Pack' : 'Pack (no disponible)';
     if (!packAllowed && typeInput.value === 'pack') {
+      typeInput.value = 'unidad';
+    }
+    const promotionAllowed = productAllowsPromotion(product);
+    promotionOption.disabled = !promotionAllowed;
+    promotionOption.textContent = promotionAllowed ? 'Promoción' : 'Promoción (no disponible)';
+    if (!promotionAllowed && typeInput.value === 'promocion') {
       typeInput.value = 'unidad';
     }
   }
@@ -4011,7 +4064,9 @@ include 'partials/header.php';
     }
 
     const maxUnits = availableStock(item.product, cart) + Number(item.units || 0);
-    const unitsPerItem = item.type === 'pack' ? Number(item.product.pack_cantidad || 0) : 1;
+    const unitsPerItem = item.type === 'pack'
+      ? Number(item.product.pack_cantidad || 0)
+      : (item.type === 'promocion' ? Number(item.product.promocion_cantidad || 0) : 1);
     const maxQuantity = Math.floor(maxUnits / Math.max(1, unitsPerItem));
 
     if (maxQuantity <= 0) {
@@ -4050,7 +4105,9 @@ include 'partials/header.php';
     if (!item || !Number.isFinite(typedQuantity) || typedQuantity < 1) return;
 
     const maxUnits = availableStock(item.product, cart) + Number(item.units || 0);
-    const unitsPerItem = item.type === 'pack' ? Number(item.product.pack_cantidad || 0) : 1;
+    const unitsPerItem = item.type === 'pack'
+      ? Number(item.product.pack_cantidad || 0)
+      : (item.type === 'promocion' ? Number(item.product.promocion_cantidad || 0) : 1);
     const nextQuantity = Math.min(typedQuantity, Math.floor(maxUnits / Math.max(1, unitsPerItem)));
     if (nextQuantity < 1) return;
 
@@ -4107,14 +4164,24 @@ include 'partials/header.php';
     const packQuantity = Number(product.pack_cantidad || 0);
     const unitPrice = Number(product.precio_venta || 0);
     const packPrice = Number(product.precio_pack || 0);
+    const promotionQuantity = Number(product.promocion_cantidad || 0);
+    const promotionPrice = Number(product.precio_promocion || 0);
     if (isPack && (packQuantity <= 0 || packPrice <= 0)) {
       showClientMessage('Este producto no tiene pack configurado.');
       return;
     }
 
-    const units = isPack ? quantity * packQuantity : quantity;
+    if (type === 'promocion' && (promotionQuantity <= 0 || promotionPrice <= 0)) {
+      showClientMessage('Este producto no tiene promocion configurada.');
+      return;
+    }
+
+    const units = isPack
+      ? quantity * packQuantity
+      : (type === 'promocion' ? quantity * promotionQuantity : quantity);
     if (units > available) {
-      quantityInput.value = isPack ? Math.floor(available / packQuantity) : available;
+      const unitsPerItem = isPack ? packQuantity : (type === 'promocion' ? promotionQuantity : 1);
+      quantityInput.value = Math.floor(available / unitsPerItem);
       if (isReservation) {
         updateReservationSaleTotal();
       } else {
@@ -4124,7 +4191,7 @@ include 'partials/header.php';
       return;
     }
 
-    const price = isPack ? packPrice : unitPrice;
+    const price = isPack ? packPrice : (type === 'promocion' ? promotionPrice : unitPrice);
     const existing = cart.find((item) => Number(item.product.id) === Number(product.id) && item.type === type);
 
     if (existing) {
@@ -5036,6 +5103,8 @@ include 'partials/header.php';
     document.getElementById('editProductoPackCantidad').value = Number(product.pack_cantidad || 0);
     document.getElementById('editProductoCompraPack').value = money(product.precio_compra_pack);
     document.getElementById('editProductoPackPrecio').value = money(product.precio_pack);
+    document.getElementById('editProductoPromoCantidad').value = Number(product.promocion_cantidad || 0);
+    document.getElementById('editProductoPromoPrecio').value = money(product.precio_promocion);
     document.getElementById('editProductoStock').value = Number(product.stock || 0);
     document.getElementById('editProductoEstado').value = product.estado || 'activo';
     updateProductDuplicateWarning('editProductoNombre', 'editProductDuplicateName', productForm.dataset.editProductId);
@@ -5074,6 +5143,8 @@ include 'partials/header.php';
     document.getElementById('editProductoPackCantidad').value = '0';
     document.getElementById('editProductoCompraPack').value = '0';
     document.getElementById('editProductoPackPrecio').value = '0';
+    document.getElementById('editProductoPromoCantidad').value = '0';
+    document.getElementById('editProductoPromoPrecio').value = '0';
     document.getElementById('editProductoStock').value = '0';
     document.getElementById('editProductoEstado').value = 'activo';
     setProductDuplicateWarning('editProductDuplicateName', '');
@@ -5596,8 +5667,9 @@ include 'partials/header.php';
       .map((item) => {
         const product = products.find((productItem) => Number(productItem.id) === Number(item.producto_id));
         if (!product) return null;
-        const isPack = item.tipo_venta === 'pack';
-        const price = isPack ? Number(product.precio_pack || 0) : Number(product.precio_venta || 0);
+        const price = item.tipo_venta === 'pack'
+          ? Number(product.precio_pack || 0)
+          : (item.tipo_venta === 'promocion' ? Number(product.precio_promocion || 0) : Number(product.precio_venta || 0));
 
         return {
           product,
@@ -6270,7 +6342,7 @@ include 'partials/header.php';
     updateProductDuplicateWarning('editProductoNombre', 'editProductDuplicateName', document.getElementById('productForm')?.dataset.editProductId || '');
   });
 
-  document.querySelectorAll('#productForm [name="categoria"], #productForm .money-input, #productForm [name="pack_cantidad"], #quickProductForm [name="categoria"], #quickProductForm .money-input, #quickProductForm [name="pack_cantidad"]').forEach((input) => {
+  document.querySelectorAll('#productForm [name="categoria"], #productForm .money-input, #productForm [name="pack_cantidad"], #productForm [name="promocion_cantidad"], #quickProductForm [name="categoria"], #quickProductForm .money-input, #quickProductForm [name="pack_cantidad"], #quickProductForm [name="promocion_cantidad"]').forEach((input) => {
     input.addEventListener('input', () => input.setCustomValidity(''));
     input.addEventListener('blur', () => validateProductRequiredFields(input.closest('form')));
   });
@@ -6280,7 +6352,7 @@ include 'partials/header.php';
     input.addEventListener('blur', () => syncProductUnitPricesFromPack(input.closest('form')));
   });
 
-  document.querySelectorAll('#productForm [name="pack_cantidad"], #productForm [name="precio_compra_pack"], #productForm [name="precio_pack"], #productForm [name="precio_compra"], #productForm [name="precio_venta"], #quickProductForm [name="pack_cantidad"], #quickProductForm [name="precio_compra_pack"], #quickProductForm [name="precio_pack"], #quickProductForm [name="precio_compra"], #quickProductForm [name="precio_venta"]').forEach((input) => {
+  document.querySelectorAll('#productForm [name="pack_cantidad"], #productForm [name="precio_compra_pack"], #productForm [name="precio_pack"], #productForm [name="precio_compra"], #productForm [name="precio_venta"], #productForm [name="promocion_cantidad"], #productForm [name="precio_promocion"], #quickProductForm [name="pack_cantidad"], #quickProductForm [name="precio_compra_pack"], #quickProductForm [name="precio_pack"], #quickProductForm [name="precio_compra"], #quickProductForm [name="precio_venta"], #quickProductForm [name="promocion_cantidad"], #quickProductForm [name="precio_promocion"]').forEach((input) => {
     input.addEventListener('input', () => updateProductPriceWarnings(input.closest('form')));
     input.addEventListener('blur', () => updateProductPriceWarnings(input.closest('form')));
   });
@@ -6629,14 +6701,21 @@ include 'partials/header.php';
       return;
     }
 
-    const isPack = saleType.value === 'pack';
     const unitPrice = Number(selectedSaleProduct?.precio_venta || 0);
     const packPrice = Number(selectedSaleProduct?.precio_pack || 0);
     const packQuantity = Number(selectedSaleProduct?.pack_cantidad || 0);
-    const price = isPack ? packPrice : unitPrice;
+    const promotionPrice = Number(selectedSaleProduct?.precio_promocion || 0);
+    const promotionQuantity = Number(selectedSaleProduct?.promocion_cantidad || 0);
+    const price = saleType.value === 'pack'
+      ? packPrice
+      : (saleType.value === 'promocion' ? promotionPrice : unitPrice);
     const amount = clampSaleQuantity('sale');
     total.value = money(price * amount);
-    saleType.setCustomValidity(selectedSaleProduct && isPack && (packPrice <= 0 || packQuantity <= 0) ? 'Este producto no tiene pack configurado.' : '');
+    const invalidPack = saleType.value === 'pack' && (packPrice <= 0 || packQuantity <= 0);
+    const invalidPromotion = saleType.value === 'promocion' && (promotionPrice <= 0 || promotionQuantity <= 0);
+    saleType.setCustomValidity(selectedSaleProduct && (invalidPack || invalidPromotion)
+      ? (invalidPromotion ? 'Este producto no tiene promocion configurada.' : 'Este producto no tiene pack configurado.')
+      : '');
   }
 
   function updatePurchaseTotal() {
@@ -7053,14 +7132,21 @@ include 'partials/header.php';
       return;
     }
 
-    const isPack = saleType.value === 'pack';
     const unitPrice = Number(selectedReservationSaleProduct?.precio_venta || 0);
     const packPrice = Number(selectedReservationSaleProduct?.precio_pack || 0);
     const packQuantity = Number(selectedReservationSaleProduct?.pack_cantidad || 0);
-    const price = isPack ? packPrice : unitPrice;
+    const promotionPrice = Number(selectedReservationSaleProduct?.precio_promocion || 0);
+    const promotionQuantity = Number(selectedReservationSaleProduct?.promocion_cantidad || 0);
+    const price = saleType.value === 'pack'
+      ? packPrice
+      : (saleType.value === 'promocion' ? promotionPrice : unitPrice);
     const amount = clampSaleQuantity('reservation');
     total.value = money(price * amount);
-    saleType.setCustomValidity(selectedReservationSaleProduct && isPack && (packPrice <= 0 || packQuantity <= 0) ? 'Este producto no tiene pack configurado.' : '');
+    const invalidPack = saleType.value === 'pack' && (packPrice <= 0 || packQuantity <= 0);
+    const invalidPromotion = saleType.value === 'promocion' && (promotionPrice <= 0 || promotionQuantity <= 0);
+    saleType.setCustomValidity(selectedReservationSaleProduct && (invalidPack || invalidPromotion)
+      ? (invalidPromotion ? 'Este producto no tiene promocion configurada.' : 'Este producto no tiene pack configurado.')
+      : '');
   }
 
   document.getElementById('ventaTipo')?.addEventListener('change', updateSaleTotal);
@@ -7451,6 +7537,9 @@ include 'partials/header.php';
     const pack = Number(product.pack_cantidad || 0) > 0
       ? `${Number(product.pack_cantidad)} un. / ${money(product.precio_pack)}`
       : '-';
+    const promotion = Number(product.promocion_cantidad || 0) > 0
+      ? `${Number(product.promocion_cantidad)} por ${money(product.precio_promocion)}`
+      : '-';
     <?php if (!$esAdministrador): ?>
     return `
       <tr data-product-row>
@@ -7460,6 +7549,7 @@ include 'partials/header.php';
         <td>${escapeHtml(product.categoria || '-')}</td>
         <td>${money(product.precio_venta)}</td>
         <td>${pack}</td>
+        <td>${promotion}</td>
         <td>${Number(product.stock || 0)}</td>
         <td><span class="badge ${escapeHtml(product.estado)}">${escapeHtml(product.estado)}</span></td>
       </tr>
@@ -7475,6 +7565,7 @@ include 'partials/header.php';
         <td>${money(product.precio_venta)}</td>
         <td>${purchasePack}</td>
         <td>${pack}</td>
+        <td>${promotion}</td>
         <td>${Number(product.stock || 0)}</td>
         <td><span class="badge ${escapeHtml(product.estado)}">${escapeHtml(product.estado)}</span></td>
         <td>

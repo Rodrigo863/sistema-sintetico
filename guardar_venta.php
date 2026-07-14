@@ -65,7 +65,7 @@ foreach ($productoIds as $index => $productoIdRaw) {
         volverVenta('Selecciona un producto e ingresa una cantidad valida.');
     }
 
-    if (!in_array($tipoVenta, ['unidad', 'pack'], true)) {
+    if (!in_array($tipoVenta, ['unidad', 'pack', 'promocion'], true)) {
         $tipoVenta = 'unidad';
     }
 
@@ -105,6 +105,9 @@ if (!$stmt->fetch()) {
 }
 
 $pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS promocion_cantidad INT NOT NULL DEFAULT 0 AFTER precio_pack");
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_promocion DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER promocion_cantidad");
+$pdo->exec("ALTER TABLE venta_detalles MODIFY tipo_venta ENUM('unidad', 'pack', 'promocion') NOT NULL DEFAULT 'unidad'");
 
 $pdo->beginTransaction();
 
@@ -167,6 +170,14 @@ foreach ($lineas as $linea) {
 
         $unidadesDescontadas = $cantidad * (int)$producto['pack_cantidad'];
         $precioUnitario = (float)$producto['precio_pack'];
+    } elseif ($tipoVenta === 'promocion') {
+        if ((int)$producto['promocion_cantidad'] <= 0 || (float)$producto['precio_promocion'] <= 0) {
+            $pdo->rollBack();
+            volverVenta('Este producto no tiene promocion configurada.');
+        }
+
+        $unidadesDescontadas = $cantidad * (int)$producto['promocion_cantidad'];
+        $precioUnitario = (float)$producto['precio_promocion'];
     }
 
     $productoId = (int)$producto['id'];
