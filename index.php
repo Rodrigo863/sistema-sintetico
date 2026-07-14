@@ -2522,6 +2522,10 @@ include 'partials/header.php';
         <input type="checkbox" id="checkoutPrintTicket">
         Imprimir ticket
       </label>
+      <label class="check-line muted" title="La generacion de facturas se preparara en una proxima etapa">
+        <input type="checkbox" id="checkoutPrintInvoice" disabled>
+        Imprimir factura (pr&oacute;ximamente)
+      </label>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cancelar</button>
         <button type="button" id="confirmSaleSubmit">Confirmar venta</button>
