@@ -1848,7 +1848,17 @@ include 'partials/header.php';
   </section>
 
   <?php if ($esAdministrador): ?>
-  <section class="module" id="configuracion">
+  <section class="module" id="configuracion" data-settings-initial="<?= ($facturacionMensaje !== '' || $facturacionError !== '') ? 'facturacion' : 'usuarios' ?>">
+    <nav class="settings-menu" aria-label="Secciones de configuraci&oacute;n">
+      <button type="button" class="active" data-settings-target="usuarios" aria-selected="true">
+        <span aria-hidden="true">&#128101;</span> Usuarios
+      </button>
+      <button type="button" data-settings-target="facturacion" aria-selected="false">
+        <span aria-hidden="true">&#129534;</span> Facturaci&oacute;n
+      </button>
+    </nav>
+
+    <div class="settings-panel" data-settings-panel="facturacion" hidden>
     <article class="panel billing-settings-panel">
       <div class="section-header">
         <div>
@@ -1914,7 +1924,9 @@ include 'partials/header.php';
         <button type="submit">Guardar facturaci&oacute;n</button>
       </form>
     </article>
+    </div>
 
+    <div class="settings-panel active" data-settings-panel="usuarios">
     <article class="panel">
       <div class="section-header">
         <div>
@@ -2004,6 +2016,7 @@ include 'partials/header.php';
         </tbody>
       </table>
     </article>
+    </div>
   </section>
   <?php endif; ?>
 </main>
@@ -3024,6 +3037,9 @@ include 'partials/header.php';
 <script>
   const menuButtons = document.querySelectorAll('.module-menu button');
   const modules = document.querySelectorAll('.module');
+  const settingsModule = document.getElementById('configuracion');
+  const settingsButtons = document.querySelectorAll('[data-settings-target]');
+  const settingsPanels = document.querySelectorAll('[data-settings-panel]');
   const courts = <?= json_encode($canchas, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const providers = <?= json_encode($proveedores, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   let clients = <?= json_encode($clientes, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
@@ -3272,6 +3288,22 @@ include 'partials/header.php';
     history.replaceState(null, '', `${url.pathname}${url.search}#${moduleId}`);
   }
 
+  function showSettingsPanel(panelId) {
+    const validPanel = document.querySelector(`[data-settings-panel="${panelId}"]`)
+      ? panelId
+      : 'usuarios';
+    settingsPanels.forEach((panel) => {
+      const isActive = panel.dataset.settingsPanel === validPanel;
+      panel.classList.toggle('active', isActive);
+      panel.hidden = !isActive;
+    });
+    settingsButtons.forEach((button) => {
+      const isActive = button.dataset.settingsTarget === validPanel;
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+  }
+
   function canAutoRefreshCashModule() {
     if (document.hidden || location.hash !== '#caja') {
       return false;
@@ -3312,7 +3344,9 @@ include 'partials/header.php';
       'caja_error',
       'caja_mensaje',
       'usuario_error',
-      'usuario_mensaje'
+      'usuario_mensaje',
+      'facturacion_error',
+      'facturacion_mensaje'
     ].forEach((param) => url.searchParams.delete(param));
 
     const cleanSearch = url.searchParams.toString();
@@ -3332,6 +3366,10 @@ include 'partials/header.php';
   menuButtons.forEach((button) => {
     button.addEventListener('click', () => showModule(button.dataset.target));
   });
+  settingsButtons.forEach((button) => {
+    button.addEventListener('click', () => showSettingsPanel(button.dataset.settingsTarget));
+  });
+  showSettingsPanel(settingsModule?.dataset.settingsInitial || 'usuarios');
 
   function addDays(date, days) {
     const next = new Date(date);

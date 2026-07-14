@@ -1028,6 +1028,33 @@ td span { display: block; color: #64748b; font-size: 0.9rem; margin-top: 3px; }
 .notice.success { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
 .notice.error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
 .notice.info { background: #eff6ff; color: #1e3a8a; border: 1px solid #bfdbfe; }
+.settings-menu {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  padding: 8px;
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.settings-menu button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 150px;
+  background: #e7eef6;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+}
+.settings-menu button.active {
+  background: #0f766e;
+  color: #fff;
+  border-color: #0f766e;
+}
+.settings-panel[hidden] { display: none !important; }
+.settings-panel.active { display: block; }
 .billing-settings-panel { margin-bottom: 14px; }
 .billing-settings-form { align-items: end; }
 .billing-settings-divider {
