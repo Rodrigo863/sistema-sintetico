@@ -53,6 +53,14 @@ if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
     volverEditarProveedor('El email del proveedor no es valido.');
 }
 
+if ($telefono !== '' && !preg_match('/^\d{10}$/', $telefono)) {
+    volverEditarProveedor('El telefono del proveedor debe tener exactamente 10 numeros.');
+}
+
+if ($ruc !== '' && !preg_match('/^[0-9-]+$/', $ruc)) {
+    volverEditarProveedor('El RUC / Documento solo puede contener numeros y guion.');
+}
+
 if (!in_array($estado, ['activo', 'inactivo'], true)) {
     volverEditarProveedor('Estado de proveedor invalido.');
 }
@@ -61,6 +69,14 @@ $stmt = $pdo->prepare('SELECT id FROM proveedores WHERE LOWER(TRIM(nombre)) = LO
 $stmt->execute([$nombre, $proveedorId]);
 if ($stmt->fetch()) {
     volverEditarProveedor('Ya existe otro proveedor con ese nombre.');
+}
+
+if ($ruc !== '') {
+    $stmt = $pdo->prepare('SELECT id FROM proveedores WHERE ruc = ? AND id <> ? LIMIT 1');
+    $stmt->execute([$ruc, $proveedorId]);
+    if ($stmt->fetch()) {
+        volverEditarProveedor('Ya existe otro proveedor con ese RUC / Documento.');
+    }
 }
 
 $stmt = $pdo->prepare(

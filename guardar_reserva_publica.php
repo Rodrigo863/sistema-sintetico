@@ -1,10 +1,39 @@
 <?php
 require 'config.php';
 
-function volverReservaPublica(string $mensaje, bool $error = true): void
+function volverReservaPublica(string $mensaje, bool $error = true, int $reservaId = 0): void
 {
     $parametro = $error ? 'error' : 'mensaje';
-    redirigir('reservas_publicas.php?' . $parametro . '=' . rawurlencode($mensaje));
+    $url = 'reservas_publicas.php?' . $parametro . '=' . rawurlencode($mensaje);
+    if (!$error && $reservaId > 0) {
+        $url .= '&reserva_id=' . $reservaId;
+    }
+    redirigir($url);
+}
+
+function normalizarHoraReservaPublica(string $hora, bool $permite24 = false): ?string
+{
+    if (!preg_match('/^(\d{1,2}):(00|30)(?::00)?$/', trim($hora), $coincidencias)) {
+        return null;
+    }
+
+    $horas = (int)$coincidencias[1];
+    $minutos = $coincidencias[2];
+    if ($horas === 24 && $minutos === '00' && $permite24) {
+        return '24:00:00';
+    }
+
+    if ($horas < 0 || $horas > 23) {
+        return null;
+    }
+
+    return sprintf('%02d:%s:00', $horas, $minutos);
+}
+
+function horaReservaAHoras(string $hora): float
+{
+    [$horas, $minutos] = array_map('intval', explode(':', $hora));
+    return $horas + ($minutos / 60);
 }
 
 function guardarComprobantePublico(): ?string
@@ -57,7 +86,7 @@ $fecha = $_POST['fecha'] ?? '';
 $horaInicio = $_POST['hora_inicio'] ?? '';
 $horaFin = $_POST['hora_fin'] ?? '';
 $montoPago = leerMonto($_POST['monto_pago'] ?? 0);
-$metodo = $_POST['metodo'] ?? 'efectivo';
+$metodo = 'transferencia';
 $observacion = trim($_POST['observacion'] ?? '');
 $tieneComprobante = !empty($_FILES['comprobante_pago']['name']);
 
@@ -65,8 +94,18 @@ if ($nombre === '' || $telefono === '') {
     volverReservaPublica('Completa tu nombre y telefono.');
 }
 
+if (!preg_match('/^\d{10}$/', $telefono)) {
+    volverReservaPublica('El telefono debe tener exactamente 10 numeros.');
+}
+
 if ($canchaId <= 0 || $fecha === '' || $horaInicio === '' || $horaFin === '') {
     volverReservaPublica('Selecciona una cancha y un horario valido.');
+}
+
+$horaInicio = normalizarHoraReservaPublica($horaInicio);
+$horaFin = normalizarHoraReservaPublica($horaFin, true);
+if ($horaInicio === null || $horaFin === null) {
+    volverReservaPublica('El horario debe ser en bloques de 30 minutos, por ejemplo 18:30 a 19:30.');
 }
 
 if ($fecha < date('Y-m-d')) {
@@ -85,8 +124,8 @@ if ($montoPago > 0 && $montoPago < 20000) {
     volverReservaPublica('El abono minimo es 20.000.');
 }
 
-if (!in_array($metodo, ['efectivo', 'transferencia'], true)) {
-    $metodo = 'efectivo';
+if ($montoPago > 0 && !$tieneComprobante) {
+    volverReservaPublica('Adjunta el comprobante para pagar por transferencia.');
 }
 
 $pdo = conectarDB();
@@ -133,11 +172,11 @@ if (!$cancha) {
     volverReservaPublica('La cancha seleccionada no esta disponible.');
 }
 
-$inicio = (int)substr($horaInicio, 0, 2);
-$fin = (int)substr($horaFin, 0, 2);
+$inicio = horaReservaAHoras($horaInicio);
+$fin = horaReservaAHoras($horaFin);
 $duracion = max(0, $fin - $inicio);
-if ($duracion <= 0) {
-    volverReservaPublica('Selecciona una duracion valida.');
+if ($duracion < 1) {
+    volverReservaPublica('La duracion minima de alquiler es 1 hora.');
 }
 $precioTotal = (float)$cancha['precio_hora'] * $duracion;
 
@@ -216,4 +255,4 @@ if ($abonoQuedaPendiente) {
     $mensajeFinal .= ' El abono quedo pendiente de confirmar en caja.';
 }
 
-volverReservaPublica($mensajeFinal, false);
+volverReservaPublica($mensajeFinal, false, $reservaId);

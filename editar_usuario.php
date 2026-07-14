@@ -11,7 +11,7 @@ $usuarioId = (int)($_POST['usuario_id'] ?? 0);
 $nombre = trim($_POST['nombre'] ?? '');
 $usuario = trim($_POST['usuario'] ?? '');
 $password = (string)($_POST['password'] ?? '');
-$rol = $_POST['rol'] ?? 'usuario';
+$rol = $_POST['rol'] ?? 'secretario';
 $estado = $_POST['estado'] ?? 'activo';
 $usuarioActualId = (int)(usuarioActual()['id'] ?? 0);
 
@@ -27,8 +27,8 @@ if ($password !== '' && strlen($password) < 6) {
     redirigir('index.php?usuario_error=' . urlencode('La nueva contrasena debe tener al menos 6 caracteres.') . '#configuracion');
 }
 
-if (!in_array($rol, ['administrador', 'usuario'], true)) {
-    $rol = 'usuario';
+if (!in_array($rol, ['administrador', 'secretario'], true)) {
+    $rol = 'secretario';
 }
 
 if (!in_array($estado, ['activo', 'inactivo'], true)) {

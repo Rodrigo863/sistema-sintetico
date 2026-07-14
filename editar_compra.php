@@ -213,12 +213,29 @@ foreach ($detalles as $detalle) {
     ]);
 }
 
-$stmtPrecio = $pdo->prepare('UPDATE productos SET precio_compra = ? WHERE id = ?');
+$preciosPorProducto = [];
 foreach ($detalles as $detalle) {
-    $precioReferencia = $detalle['tipo_compra'] === 'pack' && $detalle['unidades_agregadas'] > 0
-        ? $detalle['subtotal'] / $detalle['unidades_agregadas']
-        : $detalle['precio_unitario'];
-    $stmtPrecio->execute([$precioReferencia, $detalle['producto_id']]);
+    $productoId = $detalle['producto_id'];
+    $preciosPorProducto[$productoId] ??= ['unidad' => null, 'pack' => null, 'unidad_pack' => null];
+
+    if ($detalle['tipo_compra'] === 'pack') {
+        $preciosPorProducto[$productoId]['pack'] = $detalle['precio_unitario'];
+        $preciosPorProducto[$productoId]['unidad_pack'] = $detalle['unidades_agregadas'] > 0
+            ? $detalle['subtotal'] / $detalle['unidades_agregadas']
+            : null;
+    } else {
+        $preciosPorProducto[$productoId]['unidad'] = $detalle['precio_unitario'];
+    }
+}
+
+$stmtPrecio = $pdo->prepare(
+    'UPDATE productos
+     SET precio_compra = ?, precio_compra_pack = COALESCE(?, precio_compra_pack)
+     WHERE id = ?'
+);
+foreach ($preciosPorProducto as $productoId => $preciosProducto) {
+    $precioUnidad = $preciosProducto['unidad'] ?? $preciosProducto['unidad_pack'];
+    $stmtPrecio->execute([$precioUnidad, $preciosProducto['pack'], $productoId]);
 }
 
 $pdo->commit();

@@ -74,6 +74,7 @@ if (empty($lineas)) {
 }
 
 $pdo = conectarDB();
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad");
 $pdo->beginTransaction();
 
 if ($proveedorId > 0) {
@@ -158,16 +159,41 @@ foreach ($detalles as $detalle) {
     ]);
 }
 
-$stmtStock = $pdo->prepare('UPDATE productos SET stock = stock + ?, precio_compra = ? WHERE id = ?');
+$stmtStock = $pdo->prepare('UPDATE productos SET stock = stock + ? WHERE id = ?');
 foreach ($detalles as $detalle) {
     if ($detalle['stock_ya_cargado']) {
         continue;
     }
 
-    $precioReferencia = $detalle['tipo_compra'] === 'pack' && $detalle['unidades_agregadas'] > 0
-        ? $detalle['subtotal'] / $detalle['unidades_agregadas']
-        : $detalle['precio_unitario'];
-    $stmtStock->execute([$detalle['unidades_agregadas'], $precioReferencia, $detalle['producto_id']]);
+    $stmtStock->execute([$detalle['unidades_agregadas'], $detalle['producto_id']]);
+}
+
+// Consolida los precios por producto. Si hay compra por unidad y por pack en la
+// misma operacion, el precio explicito de unidad tiene prioridad como costo
+// unitario y el precio del pack se guarda en su propio campo.
+$preciosPorProducto = [];
+foreach ($detalles as $detalle) {
+    $productoId = $detalle['producto_id'];
+    $preciosPorProducto[$productoId] ??= ['unidad' => null, 'pack' => null, 'unidad_pack' => null];
+
+    if ($detalle['tipo_compra'] === 'pack') {
+        $preciosPorProducto[$productoId]['pack'] = $detalle['precio_unitario'];
+        $preciosPorProducto[$productoId]['unidad_pack'] = $detalle['unidades_agregadas'] > 0
+            ? $detalle['subtotal'] / $detalle['unidades_agregadas']
+            : null;
+    } else {
+        $preciosPorProducto[$productoId]['unidad'] = $detalle['precio_unitario'];
+    }
+}
+
+$stmtPrecio = $pdo->prepare(
+    'UPDATE productos
+     SET precio_compra = ?, precio_compra_pack = COALESCE(?, precio_compra_pack)
+     WHERE id = ?'
+);
+foreach ($preciosPorProducto as $productoId => $preciosProducto) {
+    $precioUnidad = $preciosProducto['unidad'] ?? $preciosProducto['unidad_pack'];
+    $stmtPrecio->execute([$precioUnidad, $preciosProducto['pack'], $productoId]);
 }
 
 $pdo->commit();

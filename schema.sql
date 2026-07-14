@@ -42,13 +42,17 @@ CREATE TABLE IF NOT EXISTS usuarios (
   nombre VARCHAR(120) NOT NULL,
   usuario VARCHAR(60) NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
-  rol ENUM('administrador', 'usuario') NOT NULL DEFAULT 'usuario',
+  rol ENUM('administrador', 'secretario') NOT NULL DEFAULT 'secretario',
   estado ENUM('activo', 'inactivo') NOT NULL DEFAULT 'activo',
   ultimo_acceso DATETIME DEFAULT NULL,
   creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_usuarios_usuario (usuario)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE usuarios MODIFY rol ENUM('administrador', 'usuario', 'secretario') NOT NULL DEFAULT 'secretario';
+UPDATE usuarios SET rol = 'secretario' WHERE rol = 'usuario';
+ALTER TABLE usuarios MODIFY rol ENUM('administrador', 'secretario') NOT NULL DEFAULT 'secretario';
 
 CREATE TABLE IF NOT EXISTS reservas (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -79,6 +83,38 @@ CREATE TABLE IF NOT EXISTS pagos (
   CONSTRAINT fk_pagos_reserva FOREIGN KEY (reserva_id) REFERENCES reservas(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS caja_jornadas (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  fecha DATE NOT NULL,
+  monto_inicial DECIMAL(10,2) NOT NULL DEFAULT 0,
+  monto_cierre_efectivo DECIMAL(10,2) DEFAULT NULL,
+  monto_cierre_transferencia DECIMAL(10,2) DEFAULT NULL,
+  estado ENUM('abierta', 'cerrada') NOT NULL DEFAULT 'abierta',
+  abierta_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  cerrada_en DATETIME DEFAULT NULL,
+  usuario_apertura_id INT DEFAULT NULL,
+  usuario_cierre_id INT DEFAULT NULL,
+  observacion_apertura TEXT DEFAULT NULL,
+  observacion_cierre TEXT DEFAULT NULL,
+  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_caja_jornadas_usuario_apertura FOREIGN KEY (usuario_apertura_id) REFERENCES usuarios(id),
+  CONSTRAINT fk_caja_jornadas_usuario_cierre FOREIGN KEY (usuario_cierre_id) REFERENCES usuarios(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS caja_movimientos (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  caja_jornada_id INT NOT NULL,
+  tipo ENUM('ingreso', 'egreso') NOT NULL,
+  concepto VARCHAR(120) NOT NULL,
+  detalle TEXT DEFAULT NULL,
+  metodo ENUM('efectivo', 'transferencia') NOT NULL DEFAULT 'efectivo',
+  monto DECIMAL(10,2) NOT NULL,
+  fecha_movimiento DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_caja_movimientos_jornada FOREIGN KEY (caja_jornada_id) REFERENCES caja_jornadas(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS productos (
   id INT AUTO_INCREMENT PRIMARY KEY,
   nombre VARCHAR(120) NOT NULL,
@@ -88,6 +124,7 @@ CREATE TABLE IF NOT EXISTS productos (
   precio_compra DECIMAL(10,2) NOT NULL DEFAULT 0,
   precio_venta DECIMAL(10,2) NOT NULL DEFAULT 0,
   pack_cantidad INT NOT NULL DEFAULT 0,
+  precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0,
   precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0,
   stock INT NOT NULL DEFAULT 0,
   estado ENUM('activo', 'inactivo') NOT NULL DEFAULT 'activo',
@@ -166,10 +203,13 @@ ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra DECIMAL(10,2) NOT N
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS codigo_barra VARCHAR(80) DEFAULT NULL AFTER nombre;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFTER categoria;
 ALTER TABLE productos ADD COLUMN IF NOT EXISTS pack_cantidad INT NOT NULL DEFAULT 0 AFTER precio_venta;
-ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad;
+ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER precio_compra_pack;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS cliente_id INT DEFAULT NULL AFTER reserva_id;
 ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa' AFTER metodo;
 ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante_path VARCHAR(255) DEFAULT NULL AFTER observacion;
+ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_apertura_id INT DEFAULT NULL AFTER cerrada_en;
+ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_cierre_id INT DEFAULT NULL AFTER usuario_apertura_id;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS tipo_venta ENUM('unidad', 'pack') NOT NULL DEFAULT 'unidad' AFTER producto_id;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS unidades_descontadas INT NOT NULL DEFAULT 0 AFTER cantidad;
 ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario;

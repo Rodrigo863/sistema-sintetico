@@ -22,6 +22,18 @@ if ($nombre === '') {
     redirigirErrorCliente('El nombre es obligatorio.');
 }
 
+if ($telefono === '') {
+    redirigirErrorCliente('El telefono es obligatorio.');
+}
+
+if (!preg_match('/^\d{10}$/', $telefono)) {
+    redirigirErrorCliente('El telefono debe tener exactamente 10 numeros.');
+}
+
+if ($documento !== '' && !preg_match('/^[0-9-]+$/', $documento)) {
+    redirigirErrorCliente('El documento o RUC solo puede contener numeros y guion.');
+}
+
 if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
     redirigirErrorCliente('El email no tiene un formato valido.');
 }

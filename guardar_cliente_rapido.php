@@ -12,9 +12,25 @@ $nombre = trim($_POST['nombre'] ?? '');
 $telefono = trim($_POST['telefono'] ?? '');
 $email = trim($_POST['email'] ?? '');
 $documento = trim($_POST['documento'] ?? '');
+$notas = trim($_POST['notas'] ?? '');
 
 if ($nombre === '') {
     echo json_encode(['ok' => false, 'error' => 'El nombre es obligatorio.']);
+    exit;
+}
+
+if ($telefono === '') {
+    echo json_encode(['ok' => false, 'error' => 'El telefono es obligatorio.']);
+    exit;
+}
+
+if (!preg_match('/^\d{10}$/', $telefono)) {
+    echo json_encode(['ok' => false, 'error' => 'El telefono debe tener exactamente 10 numeros.']);
+    exit;
+}
+
+if ($documento !== '' && !preg_match('/^[0-9-]+$/', $documento)) {
+    echo json_encode(['ok' => false, 'error' => 'El documento o RUC solo puede contener numeros y guion.']);
     exit;
 }
 
@@ -58,14 +74,15 @@ if ($clienteExistente) {
 }
 
 $stmt = $pdo->prepare(
-    'INSERT INTO clientes (nombre, email, telefono, documento)
-     VALUES (?, ?, ?, ?)'
+    'INSERT INTO clientes (nombre, email, telefono, documento, notas)
+     VALUES (?, ?, ?, ?, ?)'
 );
 $stmt->execute([
     $nombre,
     $email ?: null,
     $telefono,
     $documento ?: null,
+    $notas ?: null,
 ]);
 
 $id = (int)$pdo->lastInsertId();
@@ -78,5 +95,6 @@ echo json_encode([
         'telefono' => $telefono,
         'email' => $email,
         'documento' => $documento,
+        'notas' => $notas,
     ],
 ]);

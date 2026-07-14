@@ -7,13 +7,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 function volverCaja(string $mensaje, bool $error = true): void
 {
-    $fecha = $_POST['fecha'] ?? date('Y-m-d');
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) {
-        $fecha = date('Y-m-d');
-    }
-
     $clave = $error ? 'caja_error' : 'caja_mensaje';
-    redirigir('index.php?caja_fecha=' . rawurlencode($fecha) . '&' . $clave . '=' . rawurlencode($mensaje) . '#caja');
+    redirigir('index.php?' . $clave . '=' . rawurlencode($mensaje) . '#caja');
 }
 
 function ingresarAbonoPendiente(PDO $pdo, array $abono): void
@@ -38,13 +33,13 @@ function ingresarAbonoPendiente(PDO $pdo, array $abono): void
     $stmt->execute([(int)$abono['reserva_id']]);
 }
 
-$fecha = $_POST['fecha'] ?? date('Y-m-d');
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $fecha)) {
-    volverCaja('Fecha de caja invalida.');
-}
+// Ignora cualquier fecha enviada por el navegador: todas las operaciones de
+// caja deben registrarse exclusivamente en la fecha actual del servidor.
+$fecha = date('Y-m-d');
 
 $accion = $_POST['accion'] ?? '';
 $observacion = trim($_POST['observacion'] ?? '');
+$usuarioActualId = (int)(usuarioActual()['id'] ?? 0);
 
 $pdo = conectarDB();
 $pdo->exec(
@@ -57,12 +52,16 @@ $pdo->exec(
       estado ENUM('abierta', 'cerrada') NOT NULL DEFAULT 'abierta',
       abierta_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       cerrada_en DATETIME DEFAULT NULL,
+      usuario_apertura_id INT DEFAULT NULL,
+      usuario_cierre_id INT DEFAULT NULL,
       observacion_apertura TEXT DEFAULT NULL,
       observacion_cierre TEXT DEFAULT NULL,
       creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
+$pdo->exec("ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_apertura_id INT DEFAULT NULL AFTER cerrada_en");
+$pdo->exec("ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_cierre_id INT DEFAULT NULL AFTER usuario_apertura_id");
 $cajaIndiceUnico = (int)$pdo->query(
     "SELECT COUNT(*)
      FROM INFORMATION_SCHEMA.STATISTICS
@@ -123,10 +122,10 @@ if ($accion === 'abrir') {
     }
 
     $stmt = $pdo->prepare(
-        'INSERT INTO caja_jornadas (fecha, monto_inicial, observacion_apertura)
-         VALUES (?, ?, ?)'
+        'INSERT INTO caja_jornadas (fecha, monto_inicial, usuario_apertura_id, observacion_apertura)
+         VALUES (?, ?, ?, ?)'
     );
-    $stmt->execute([$fecha, $montoInicial, $observacion ?: null]);
+    $stmt->execute([$fecha, $montoInicial, $usuarioActualId > 0 ? $usuarioActualId : null, $observacion ?: null]);
     $pdo->commit();
 
     volverCaja('Caja abierta correctamente.', false);
@@ -166,11 +165,18 @@ if ($accion === 'cerrar') {
          SET estado = 'cerrada',
              monto_cierre_efectivo = ?,
              monto_cierre_transferencia = ?,
+             usuario_cierre_id = ?,
              observacion_cierre = ?,
              cerrada_en = NOW()
          WHERE id = ?"
     );
-    $stmt->execute([$montoEfectivo, $montoTransferencia, $observacion ?: null, (int)$jornada['id']]);
+    $stmt->execute([
+        $montoEfectivo,
+        $montoTransferencia,
+        $usuarioActualId > 0 ? $usuarioActualId : null,
+        $observacion ?: null,
+        (int)$jornada['id'],
+    ]);
     $pdo->commit();
 
     volverCaja('Caja cerrada correctamente.', false);
@@ -262,7 +268,12 @@ if ($accion === 'confirmar_abono') {
 if ($accion === 'confirmar_comprobante_abono') {
     $abonoPendienteId = (int)($_POST['abono_pendiente_id'] ?? 0);
     $reservaId = (int)($_POST['reserva_id'] ?? 0);
-    $volverDetalle = function (string $mensaje) use (&$reservaId): void {
+    $volver = $_POST['volver'] ?? 'reservas';
+    $volverDetalle = function (string $mensaje, bool $error = false) use (&$reservaId, $volver): void {
+        if ($volver === 'caja') {
+            volverCaja($mensaje, $error);
+        }
+
         redirigir(
             'index.php' . (
                 $reservaId > 0
@@ -293,7 +304,7 @@ if ($accion === 'confirmar_comprobante_abono') {
 
     if (empty($abono['comprobante_path'])) {
         $pdo->rollBack();
-        $volverDetalle('Este abono no tiene comprobante para confirmar.');
+        $volverDetalle('Este abono no tiene comprobante para confirmar.', true);
     }
 
     ingresarAbonoPendiente($pdo, $abono);

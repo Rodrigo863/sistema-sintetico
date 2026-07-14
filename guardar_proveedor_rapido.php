@@ -23,6 +23,16 @@ if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
     exit;
 }
 
+if ($telefono !== '' && !preg_match('/^\d{10}$/', $telefono)) {
+    echo json_encode(['ok' => false, 'error' => 'El telefono debe tener exactamente 10 numeros.']);
+    exit;
+}
+
+if ($ruc !== '' && !preg_match('/^[0-9-]+$/', $ruc)) {
+    echo json_encode(['ok' => false, 'error' => 'El RUC / Documento solo puede contener numeros y guion.']);
+    exit;
+}
+
 $pdo = conectarDB();
 
 $stmt = $pdo->prepare(

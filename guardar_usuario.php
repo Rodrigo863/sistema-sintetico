@@ -10,7 +10,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $nombre = trim($_POST['nombre'] ?? '');
 $usuario = trim($_POST['usuario'] ?? '');
 $password = (string)($_POST['password'] ?? '');
-$rol = $_POST['rol'] ?? 'usuario';
+$rol = $_POST['rol'] ?? 'secretario';
 
 if ($nombre === '' || $usuario === '' || $password === '') {
     redirigir('index.php?usuario_error=' . urlencode('Completa todos los campos del usuario.') . '#configuracion');
@@ -24,8 +24,8 @@ if (!preg_match('/^[a-zA-Z0-9._-]{3,60}$/', $usuario)) {
     redirigir('index.php?usuario_error=' . urlencode('El usuario debe tener 3 a 60 caracteres y solo letras, numeros, punto, guion o guion bajo.') . '#configuracion');
 }
 
-if (!in_array($rol, ['administrador', 'usuario'], true)) {
-    $rol = 'usuario';
+if (!in_array($rol, ['administrador', 'secretario'], true)) {
+    $rol = 'secretario';
 }
 
 try {

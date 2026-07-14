@@ -23,6 +23,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirigirErrorCliente('El nombre es obligatorio.');
     }
 
+    if ($telefono === '') {
+        redirigirErrorCliente('El telefono es obligatorio.');
+    }
+
+    if (!preg_match('/^\d{10}$/', $telefono)) {
+        redirigirErrorCliente('El telefono debe tener exactamente 10 numeros.');
+    }
+
+    if ($documento !== '' && !preg_match('/^[0-9-]+$/', $documento)) {
+        redirigirErrorCliente('El documento o RUC solo puede contener numeros y guion.');
+    }
+
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
         redirigirErrorCliente('El email no tiene un formato valido.');
     }
@@ -75,7 +87,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id,
     ]);
 
-    redirigir('index.php');
+    redirigir('index.php#clientes');
 }
 
 $stmt = $pdo->prepare('SELECT * FROM clientes WHERE id = ?');
@@ -94,7 +106,7 @@ include 'partials/header.php';
     <h1>Editar cliente</h1>
     <form action="editar_cliente.php?id=<?= $id ?>" method="post" class="grid">
       <label>Nombre <input type="text" name="nombre" value="<?= e($cliente['nombre']) ?>" required></label>
-      <label>Tel&eacute;fono <input type="text" name="telefono" value="<?= e($cliente['telefono']) ?>"></label>
+      <label>Tel&eacute;fono <input type="text" name="telefono" value="<?= e($cliente['telefono']) ?>" required></label>
       <label>Email <input type="email" name="email" value="<?= e($cliente['email']) ?>"></label>
       <label>Documento <input type="text" name="documento" value="<?= e($cliente['documento']) ?>"></label>
       <label>Direcci&oacute;n <input type="text" name="direccion" value="<?= e($cliente['direccion']) ?>"></label>

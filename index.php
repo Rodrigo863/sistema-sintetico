@@ -2,9 +2,11 @@
 require 'config.php';
 
 $pdo = conectarDB();
+$esAdministrador = esAdministrador();
 $pdo->exec("ALTER TABLE ventas ADD COLUMN IF NOT EXISTS estado ENUM('activa', 'anulada') NOT NULL DEFAULT 'activa' AFTER metodo");
 $pdo->exec("ALTER TABLE venta_detalles ADD COLUMN IF NOT EXISTS costo_unitario DECIMAL(10,2) NULL DEFAULT NULL AFTER precio_unitario");
 $pdo->exec("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante_path VARCHAR(255) DEFAULT NULL AFTER observacion");
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -72,12 +74,16 @@ $pdo->exec(
       estado ENUM('abierta', 'cerrada') NOT NULL DEFAULT 'abierta',
       abierta_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       cerrada_en DATETIME DEFAULT NULL,
+      usuario_apertura_id INT DEFAULT NULL,
+      usuario_cierre_id INT DEFAULT NULL,
       observacion_apertura TEXT DEFAULT NULL,
       observacion_cierre TEXT DEFAULT NULL,
       creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       actualizado_en TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 );
+$pdo->exec("ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_apertura_id INT DEFAULT NULL AFTER cerrada_en");
+$pdo->exec("ALTER TABLE caja_jornadas ADD COLUMN IF NOT EXISTS usuario_cierre_id INT DEFAULT NULL AFTER usuario_apertura_id");
 $cajaIndiceUnico = (int)$pdo->query(
     "SELECT COUNT(*)
      FROM INFORMATION_SCHEMA.STATISTICS
@@ -143,7 +149,9 @@ $productos = $pdo->query(
 )->fetchAll();
 $categorias = $pdo->query("SELECT * FROM producto_categorias ORDER BY estado ASC, nombre ASC")->fetchAll();
 $categoriasActivas = array_values(array_filter($categorias, fn($categoria) => $categoria['estado'] === 'activo'));
-$usuariosSistema = $pdo->query("SELECT id, nombre, usuario, rol, estado, ultimo_acceso, creado_en FROM usuarios ORDER BY estado ASC, nombre ASC")->fetchAll();
+$usuariosSistema = $esAdministrador
+    ? $pdo->query("SELECT id, nombre, usuario, rol, estado, ultimo_acceso, creado_en FROM usuarios ORDER BY estado ASC, nombre ASC")->fetchAll()
+    : [];
 $usuarioMensaje = trim($_GET['usuario_mensaje'] ?? '');
 $usuarioError = trim($_GET['usuario_error'] ?? '');
 
@@ -352,8 +360,21 @@ $stmt = $pdo->prepare(
 $stmt->execute($ventaParams);
 $ventas = $stmt->fetchAll();
 
+$todasVentas = $pdo->query(
+    "SELECT v.*, cl.nombre AS cliente, r.fecha AS reserva_fecha, ca.nombre AS reserva_cancha,
+            COUNT(vd.id) AS items,
+            COALESCE(SUM(vd.unidades_descontadas), 0) AS unidades
+     FROM ventas v
+     LEFT JOIN venta_detalles vd ON vd.venta_id = v.id
+     LEFT JOIN clientes cl ON cl.id = v.cliente_id
+     LEFT JOIN reservas r ON r.id = v.reserva_id
+     LEFT JOIN canchas ca ON ca.id = r.cancha_id
+     GROUP BY v.id
+     ORDER BY v.fecha_venta DESC"
+)->fetchAll();
+
 $ventaDetalles = [];
-$ventasIds = array_map('intval', array_column($ventas, 'id'));
+$ventasIds = array_map('intval', array_column($todasVentas, 'id'));
 if (!empty($ventasIds)) {
     $ventasPlaceholders = implode(',', array_fill(0, count($ventasIds), '?'));
     $stmt = $pdo->prepare(
@@ -451,7 +472,11 @@ $comprasIds = array_map('intval', array_column($todasCompras, 'id'));
 if (!empty($comprasIds)) {
     $comprasPlaceholders = implode(',', array_fill(0, count($comprasIds), '?'));
     $stmt = $pdo->prepare(
-        "SELECT cd.*, p.nombre AS producto, c.fecha_compra, c.total, c.metodo, c.estado, c.observacion,
+        "SELECT cd.*, p.nombre AS producto, p.estado AS producto_estado, p.stock AS producto_stock,
+                p.pack_cantidad AS producto_pack_cantidad, p.precio_compra AS producto_precio_compra,
+                p.precio_compra_pack AS producto_precio_compra_pack, p.precio_venta AS producto_precio_venta,
+                p.precio_pack AS producto_precio_pack,
+                c.fecha_compra, c.total, c.metodo, c.estado, c.observacion,
                 pv.nombre AS proveedor
          FROM compra_detalles cd
          INNER JOIN compras c ON c.id = cd.compra_id
@@ -484,16 +509,21 @@ $saldoPendiente = (float)$pdo->query(
      ) deuda
      WHERE deuda.saldo > 0"
 )->fetchColumn();
-$cajaFecha = $_GET['caja_fecha'] ?? $hoy;
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $cajaFecha)) {
-    $cajaFecha = $hoy;
-}
+// La caja siempre corresponde al dia actual. No se permite consultar ni operar
+// otra fecha mediante parametros manipulados en la URL.
+$cajaFecha = $hoy;
 
 $stmt = $pdo->prepare(
-    "SELECT *
-     FROM caja_jornadas
-     WHERE fecha = ?
-     ORDER BY CASE WHEN estado = 'abierta' THEN 0 ELSE 1 END, id DESC
+    "SELECT cj.*,
+            ua.nombre AS usuario_apertura_nombre,
+            ua.usuario AS usuario_apertura_usuario,
+            uc.nombre AS usuario_cierre_nombre,
+            uc.usuario AS usuario_cierre_usuario
+     FROM caja_jornadas cj
+     LEFT JOIN usuarios ua ON ua.id = cj.usuario_apertura_id
+     LEFT JOIN usuarios uc ON uc.id = cj.usuario_cierre_id
+     WHERE cj.fecha = ?
+     ORDER BY CASE WHEN cj.estado = 'abierta' THEN 0 ELSE 1 END, cj.id DESC
      LIMIT 1"
 );
 $stmt->execute([$cajaFecha]);
@@ -553,11 +583,15 @@ $cajaCierreTransferencia = isset($cajaJornada['monto_cierre_transferencia']) ? (
 $cajaTotalCierre = ($cajaCierreEfectivo ?? 0) + ($cajaCierreTransferencia ?? 0);
 $cajaDiferenciaEfectivo = $cajaCierreEfectivo === null ? null : $cajaCierreEfectivo - $cajaSaldoEfectivo;
 $cajaDiferenciaTransferencia = $cajaCierreTransferencia === null ? null : $cajaCierreTransferencia - $cajaSaldoTransferencia;
+$cajaUsuarioApertura = $cajaJornada['usuario_apertura_nombre'] ?? $cajaJornada['usuario_apertura_usuario'] ?? '';
+$cajaUsuarioCierre = $cajaJornada['usuario_cierre_nombre'] ?? $cajaJornada['usuario_cierre_usuario'] ?? '';
 
 $stmt = $pdo->prepare(
     "SELECT 'apertura' AS tipo, 'Apertura de caja' AS concepto, cj.abierta_en AS fecha, cj.monto_inicial AS monto,
-            'efectivo' AS metodo, COALESCE(cj.observacion_apertura, 'Monto inicial') AS detalle
+            'efectivo' AS metodo,
+            CONCAT(COALESCE(cj.observacion_apertura, 'Monto inicial'), ' - Usuario: ', COALESCE(ua.nombre, ua.usuario, 'Sin usuario registrado')) AS detalle
      FROM caja_jornadas cj
+     LEFT JOIN usuarios ua ON ua.id = cj.usuario_apertura_id
      WHERE cj.id = ?
      UNION ALL
      SELECT 'ingreso' AS tipo, 'Pago reserva' AS concepto, MAX(p.fecha_pago) AS fecha, SUM(p.monto) AS monto,
@@ -582,8 +616,10 @@ $stmt = $pdo->prepare(
      UNION ALL
      SELECT 'cierre' AS tipo, 'Cierre de caja' AS concepto, cj.cerrada_en AS fecha,
             COALESCE(cj.monto_cierre_efectivo, 0) + COALESCE(cj.monto_cierre_transferencia, 0) AS monto,
-            'control' AS metodo, COALESCE(cj.observacion_cierre, 'Caja cerrada') AS detalle
+            'control' AS metodo,
+            CONCAT(COALESCE(cj.observacion_cierre, 'Caja cerrada'), ' - Usuario: ', COALESCE(uc.nombre, uc.usuario, 'Sin usuario registrado')) AS detalle
      FROM caja_jornadas cj
+     LEFT JOIN usuarios uc ON uc.id = cj.usuario_cierre_id
      WHERE cj.id = ? AND cj.estado = 'cerrada'
      ORDER BY fecha DESC"
 );
@@ -592,10 +628,16 @@ $cajaMovimientos = $stmt->fetchAll();
 $cajaMovimientosDetalle = array_values(array_filter($cajaMovimientos, fn($movimiento) => in_array($movimiento['tipo'], ['ingreso', 'egreso'], true)));
 
 $stmt = $pdo->prepare(
-    "SELECT *
-     FROM caja_jornadas
-     WHERE fecha = ? AND estado = 'cerrada'
-     ORDER BY cerrada_en DESC, id DESC
+    "SELECT cj.*,
+            ua.nombre AS usuario_apertura_nombre,
+            ua.usuario AS usuario_apertura_usuario,
+            uc.nombre AS usuario_cierre_nombre,
+            uc.usuario AS usuario_cierre_usuario
+     FROM caja_jornadas cj
+     LEFT JOIN usuarios ua ON ua.id = cj.usuario_apertura_id
+     LEFT JOIN usuarios uc ON uc.id = cj.usuario_cierre_id
+     WHERE cj.fecha = ? AND cj.estado = 'cerrada'
+     ORDER BY cj.cerrada_en DESC, cj.id DESC
      LIMIT 5"
 );
 $stmt->execute([$cajaFecha]);
@@ -694,6 +736,8 @@ $proveedorError = trim($_GET['proveedor_error'] ?? '');
 $productoError = trim($_GET['producto_error'] ?? '');
 $compraError = trim($_GET['compra_error'] ?? '');
 $ventaError = trim($_GET['venta_error'] ?? '');
+$accesoError = trim($_SESSION['acceso_error'] ?? '');
+unset($_SESSION['acceso_error']);
 
 $reporteDesde = trim($_GET['reporte_desde'] ?? $hoy);
 $reporteHasta = trim($_GET['reporte_hasta'] ?? $hoy);
@@ -844,17 +888,33 @@ include 'partials/header.php';
   <nav class="module-menu" aria-label="Modulos del sistema">
     <button type="button" class="active" data-target="caja"><span class="menu-icon" aria-hidden="true">$</span><span>Caja</span></button>
     <button type="button" data-target="clientes"><span class="menu-icon" aria-hidden="true">◉</span><span>Clientes</span></button>
+    <?php if ($esAdministrador): ?>
     <button type="button" data-target="proveedores"><span class="menu-icon" aria-hidden="true">▤</span><span>Proveedores</span></button>
     <button type="button" data-target="canchas"><span class="menu-icon" aria-hidden="true">▣</span><span>Canchas</span></button>
+    <?php endif; ?>
     <button type="button" data-target="reservas" class="<?= !empty($reservasConComprobantePendiente) ? 'has-notification' : '' ?>"><span class="menu-icon" aria-hidden="true">◷</span><span>Reservas</span></button>
+    <?php if ($esAdministrador): ?>
     <button type="button" data-target="categorias"><span class="menu-icon" aria-hidden="true">◇</span><span>Categor&iacute;as</span></button>
+    <?php endif; ?>
     <button type="button" data-target="productos"><span class="menu-icon" aria-hidden="true">□</span><span>Productos</span></button>
+    <?php if ($esAdministrador): ?>
     <button type="button" data-target="compras"><span class="menu-icon" aria-hidden="true">↓</span><span>Compras</span></button>
+    <?php endif; ?>
     <button type="button" data-target="ventas"><span class="menu-icon" aria-hidden="true">↑</span><span>Ventas</span></button>
+    <?php if ($esAdministrador): ?>
     <button type="button" data-target="reportes"><span class="menu-icon" aria-hidden="true">▥</span><span>Reportes</span></button>
     <button type="button" data-target="configuracion"><span class="menu-icon" aria-hidden="true">⚙</span><span>Configuraci&oacute;n</span></button>
+    <?php endif; ?>
+    <?php if (!$esAdministrador): ?>
+      <a class="btn secondary secretary-logout" href="logout.php">Cerrar sesi&oacute;n</a>
+    <?php endif; ?>
   </nav>
 
+  <?php if ($accesoError !== ''): ?>
+    <div class="notice error"><?= e($accesoError) ?></div>
+  <?php endif; ?>
+
+  <?php if ($esAdministrador): ?>
   <section class="module" id="reportes">
     <article class="panel">
       <div class="section-header">
@@ -929,6 +989,7 @@ include 'partials/header.php';
       </table>
     </article>
   </section>
+  <?php endif; ?>
 
   <section class="module active" id="caja">
     <article class="panel">
@@ -937,9 +998,9 @@ include 'partials/header.php';
           <h2>Caja</h2>
           <span class="muted">Resumen de movimientos del d&iacute;a.</span>
         </div>
-        <form action="index.php#caja" method="get" class="search-form">
-          <input type="date" name="caja_fecha" value="<?= e($cajaFecha) ?>" onchange="this.form.submit()">
-        </form>
+        <div class="search-form">
+          <input type="date" value="<?= e($cajaFecha) ?>" readonly aria-label="Fecha actual de caja" title="La fecha de caja se establece automaticamente">
+        </div>
       </div>
 
       <?php if ($cajaError !== ''): ?>
@@ -955,6 +1016,8 @@ include 'partials/header.php';
           <?php elseif ($cajaJornada['estado'] === 'cerrada'): ?>
             <strong><span class="badge anulada">Cerrada</span></strong>
             <small>Cerrada el <?= e(date('d/m/Y H:i', strtotime($cajaJornada['cerrada_en']))) ?></small>
+            <small>Abierta por <?= e($cajaUsuarioApertura ?: 'Sin usuario registrado') ?></small>
+            <small>Cerrada por <?= e($cajaUsuarioCierre ?: 'Sin usuario registrado') ?></small>
             <div class="cash-status-amount">
               <span>Monto inicial</span>
               <strong><?= formatearGuaranies($cajaMontoInicial) ?></strong>
@@ -962,6 +1025,7 @@ include 'partials/header.php';
           <?php else: ?>
             <strong><span class="badge activa">Abierta</span></strong>
             <small>Abierta el <?= e(date('d/m/Y H:i', strtotime($cajaJornada['abierta_en']))) ?></small>
+            <small>Abierta por <?= e($cajaUsuarioApertura ?: 'Sin usuario registrado') ?></small>
             <div class="cash-status-amount">
               <span>Monto inicial</span>
               <strong><?= formatearGuaranies($cajaMontoInicial) ?></strong>
@@ -1074,7 +1138,14 @@ include 'partials/header.php';
                         <button type="submit" class="small">Ingresar a caja</button>
                       </form>
                     <?php elseif ($comprobanteDebeConfirmarse): ?>
-                      <span class="muted">Confirma comprobante</span>
+                      <button
+                        type="button"
+                        class="small danger"
+                        data-view-pending-cash-receipt
+                        data-receipt-url="<?= e($abonoPendiente['comprobante_path']) ?>"
+                        data-pending-id="<?= (int)$abonoPendiente['id'] ?>"
+                        data-reserva-id="<?= (int)$abonoPendiente['reserva_id'] ?>"
+                      >Ver y confirmar</button>
                     <?php elseif ($abonoPendiente['estado'] !== 'pendiente'): ?>
                       <span class="muted">Pendiente de revisi&oacute;n</span>
                     <?php else: ?>
@@ -1089,7 +1160,7 @@ include 'partials/header.php';
       <?php endif; ?>
 
       <?php if (!$cajaJornada || $cajaJornada['estado'] !== 'cerrada'): ?>
-        <table>
+        <table class="cash-movements-table">
           <thead><tr><th>Hora</th><th>Tipo</th><th>Concepto</th><th>Detalle</th><th>M&eacute;todo</th><th>Monto</th></tr></thead>
           <tbody>
             <?php if (empty($cajaMovimientos)): ?>
@@ -1118,13 +1189,15 @@ include 'partials/header.php';
             <span class="muted">Se muestran los 5 m&aacute;s recientes de esta fecha.</span>
           </div>
           <table>
-            <thead><tr><th>Apertura</th><th>Cierre</th><th>Inicial</th><th>Total contado</th><th>Movimientos</th></tr></thead>
+            <thead><tr><th>Apertura</th><th>Cierre</th><th>Usuario apertura</th><th>Usuario cierre</th><th>Inicial</th><th>Total contado</th><th>Movimientos</th></tr></thead>
             <tbody>
               <?php foreach ($cajaCierresRecientes as $cierre): ?>
                 <?php $detalleCierre = $cajaCierresDetalle[(int)$cierre['id']] ?? null; ?>
                 <tr class="clickable-row" data-cash-detail="<?= (int)$cierre['id'] ?>">
                   <td><?= e(date('H:i', strtotime($cierre['abierta_en']))) ?></td>
                   <td><?= e(date('H:i', strtotime($cierre['cerrada_en']))) ?></td>
+                  <td><?= e(($cierre['usuario_apertura_nombre'] ?? $cierre['usuario_apertura_usuario'] ?? '') ?: 'Sin registro') ?></td>
+                  <td><?= e(($cierre['usuario_cierre_nombre'] ?? $cierre['usuario_cierre_usuario'] ?? '') ?: 'Sin registro') ?></td>
                   <td><?= formatearGuaranies($cierre['monto_inicial']) ?></td>
                   <td><?= formatearGuaranies($detalleCierre['total_contado'] ?? 0) ?></td>
                   <td><?= count($detalleCierre['movimientos'] ?? []) ?></td>
@@ -1138,21 +1211,12 @@ include 'partials/header.php';
   </section>
 
   <section class="module" id="clientes">
-    <article class="panel">
-      <h2>Clientes</h2>
-      <form action="guardar_cliente.php" method="post" class="grid compact">
-        <label>Nombre <input type="text" name="nombre" required></label>
-        <label>Tel&eacute;fono <input type="text" name="telefono"></label>
-        <label>Email <input type="email" name="email"></label>
-        <label>Documento <input type="text" name="documento"></label>
-        <label class="wide">Notas <textarea name="notas" rows="2"></textarea></label>
-        <button type="submit">Guardar cliente</button>
-      </form>
-    </article>
-
-    <article class="panel">
-      <div class="section-header">
-        <h2>Listado de clientes</h2>
+    <article class="panel clients-panel">
+      <div class="section-header clients-list-header">
+        <div class="title-actions">
+          <h2>Listado de clientes</h2>
+          <button type="button" class="small" id="openClientListQuickClient">Nuevo cliente</button>
+        </div>
         <div class="search-form">
           <input type="search" id="clientListSearch" placeholder="Buscar cliente, telefono, email...">
           <span class="muted" id="clientListCount"><?= count($todosClientes) ?> registrado(s)</span>
@@ -1170,7 +1234,38 @@ include 'partials/header.php';
                 <td><?= e($cliente['telefono']) ?></td>
                 <td><?= e($cliente['email'] ?: '-') ?></td>
                 <td><span class="badge <?= e($cliente['estado']) ?>"><?= e($cliente['estado']) ?></span></td>
-                <td><a class="btn small secondary" href="editar_cliente.php?id=<?= (int)$cliente['id'] ?>">Editar</a></td>
+                <td>
+                  <div class="client-row-actions">
+                  <button
+                    type="button"
+                    class="small secondary"
+                    data-edit-client
+                    data-id="<?= (int)$cliente['id'] ?>"
+                    data-nombre="<?= e($cliente['nombre']) ?>"
+                    data-telefono="<?= e($cliente['telefono']) ?>"
+                    data-email="<?= e($cliente['email'] ?? '') ?>"
+                    data-documento="<?= e($cliente['documento'] ?? '') ?>"
+                    data-direccion="<?= e($cliente['direccion'] ?? '') ?>"
+                    data-estado="<?= e($cliente['estado'] ?? 'activo') ?>"
+                    data-notas="<?= e($cliente['notas'] ?? '') ?>"
+                  >Editar</button>
+                  <button
+                    type="button"
+                    class="small <?= ($cliente['estado'] ?? '') === 'activo' ? 'danger' : '' ?>"
+                    data-toggle-client
+                    data-id="<?= (int)$cliente['id'] ?>"
+                    data-nombre="<?= e($cliente['nombre']) ?>"
+                    data-estado="<?= e($cliente['estado'] ?? 'activo') ?>"
+                  ><?= ($cliente['estado'] ?? '') === 'activo' ? 'Desactivar' : 'Activar' ?></button>
+                  <button
+                    type="button"
+                    class="small danger"
+                    data-delete-client
+                    data-id="<?= (int)$cliente['id'] ?>"
+                    data-nombre="<?= e($cliente['nombre']) ?>"
+                  >Eliminar</button>
+                  </div>
+                </td>
               </tr>
             <?php endforeach; ?>
             <tr data-client-empty hidden><td colspan="5">No se encontraron clientes.</td></tr>
@@ -1181,23 +1276,14 @@ include 'partials/header.php';
     </article>
   </section>
 
+  <?php if ($esAdministrador): ?>
   <section class="module" id="proveedores">
-    <article class="panel">
-      <h2>Proveedores</h2>
-      <form action="guardar_proveedor.php" method="post" class="grid compact">
-        <label>Nombre <input type="text" name="nombre" required></label>
-        <label>Tel&eacute;fono <input type="text" name="telefono"></label>
-        <label>Email <input type="email" name="email"></label>
-        <label>RUC / Documento <input type="text" name="ruc"></label>
-        <label class="wide">Direcci&oacute;n <input type="text" name="direccion"></label>
-        <label class="wide">Notas <textarea name="notas" rows="2"></textarea></label>
-        <button type="submit">Guardar proveedor</button>
-      </form>
-    </article>
-
-    <article class="panel">
-      <div class="section-header">
-        <h2>Listado de proveedores</h2>
+    <article class="panel providers-panel">
+      <div class="section-header providers-list-header">
+        <div class="title-actions">
+          <h2>Listado de proveedores</h2>
+          <button type="button" id="openProviderListQuickProvider">Nuevo proveedor</button>
+        </div>
         <div class="search-form">
           <input type="search" id="providerSearch" placeholder="Buscar proveedor, telefono, RUC...">
           <span class="muted" id="providerCount"><?= count($proveedores) ?> registrado(s)</span>
@@ -1217,16 +1303,16 @@ include 'partials/header.php';
                 <td><?= e($proveedor['ruc'] ?: '-') ?></td>
                 <td><span class="badge <?= e($proveedor['estado']) ?>"><?= e($proveedor['estado']) ?></span></td>
                 <td>
-                  <div class="actions">
+                  <div class="provider-row-actions">
                     <button type="button" class="small secondary" data-edit-provider="<?= (int)$proveedor['id'] ?>">Editar</button>
-                    <form action="editar_proveedor.php" method="post" class="inline-form">
-                      <input type="hidden" name="proveedor_id" value="<?= (int)$proveedor['id'] ?>">
-                      <input type="hidden" name="accion" value="estado">
-                      <input type="hidden" name="estado" value="<?= $proveedor['estado'] === 'activo' ? 'inactivo' : 'activo' ?>">
-                      <button type="submit" class="small <?= $proveedor['estado'] === 'activo' ? 'danger' : '' ?>">
-                        <?= $proveedor['estado'] === 'activo' ? 'Desactivar' : 'Activar' ?>
-                      </button>
-                    </form>
+                    <button
+                      type="button"
+                      class="small <?= $proveedor['estado'] === 'activo' ? 'danger' : '' ?>"
+                      data-toggle-provider
+                      data-id="<?= (int)$proveedor['id'] ?>"
+                      data-nombre="<?= e($proveedor['nombre']) ?>"
+                      data-estado="<?= e($proveedor['estado']) ?>"
+                    ><?= $proveedor['estado'] === 'activo' ? 'Desactivar' : 'Activar' ?></button>
                     <button type="button" class="small danger" data-delete-provider="<?= (int)$proveedor['id'] ?>">Eliminar</button>
                   </div>
                 </td>
@@ -1241,40 +1327,32 @@ include 'partials/header.php';
   </section>
 
   <section class="module" id="canchas">
-    <article class="panel">
-      <h2>Canchas</h2>
-      <form action="guardar_cancha.php" method="post" class="grid compact">
-        <label>Nombre <input type="text" name="nombre" placeholder="Cancha 1" required></label>
-        <label>Tipo <input type="text" name="tipo" placeholder="Futbol 5"></label>
-        <label>Precio por hora <input type="text" name="precio_hora" class="money-input" inputmode="numeric" required></label>
-        <label>Estado
-          <select name="estado">
-            <option value="activa">Activa</option>
-            <option value="mantenimiento">Mantenimiento</option>
-            <option value="inactiva">Inactiva</option>
-          </select>
-        </label>
-        <button type="submit">Guardar cancha</button>
-      </form>
-    </article>
-
-    <article class="panel">
+    <article class="panel courts-panel">
+      <div class="section-header courts-list-header">
+        <div class="title-actions">
+          <h2>Listado de canchas</h2>
+          <button type="button" id="openCourtCreateModal">Nueva cancha</button>
+        </div>
+      </div>
       <table>
         <thead><tr><th>Nombre</th><th>Tipo</th><th>Precio hora</th><th>Estado</th><th>Acciones</th></tr></thead>
         <tbody>
           <?php foreach ($canchas as $cancha): ?>
-            <tr>
+            <tr data-court-row>
               <td><?= e($cancha['nombre']) ?></td>
               <td><?= e($cancha['tipo'] ?: '-') ?></td>
               <td><?= formatearGuaranies($cancha['precio_hora']) ?></td>
               <td><span class="badge <?= e($cancha['estado']) ?>"><?= e($cancha['estado']) ?></span></td>
               <td>
-                <div class="actions">
+                <div class="court-row-actions">
                   <button type="button" class="small secondary" data-edit-court="<?= (int)$cancha['id'] ?>">Editar</button>
-                  <form action="eliminar_cancha.php" method="post" class="inline-form">
-                    <input type="hidden" name="cancha_id" value="<?= (int)$cancha['id'] ?>">
-                    <button type="submit" class="small danger">Eliminar</button>
-                  </form>
+                  <button
+                    type="button"
+                    class="small danger"
+                    data-delete-court
+                    data-id="<?= (int)$cancha['id'] ?>"
+                    data-nombre="<?= e($cancha['nombre']) ?>"
+                  >Eliminar</button>
                 </div>
               </td>
             </tr>
@@ -1284,19 +1362,23 @@ include 'partials/header.php';
     </article>
   </section>
 
+  <?php endif; ?>
   <section class="module" id="reservas">
     <article class="panel calendar-panel">
-      <div class="court-tabs" id="courtTabs"></div>
+      <div class="court-tabs reservation-topbar">
+        <div class="court-tabs-list" id="courtTabs"></div>
+        <div class="reservation-topbar-controls">
+          <span class="court-tabs-date" id="calendarDateInTabs"></span>
+          <button type="button" class="secondary" id="prevWeek">Anterior</button>
+          <button type="button" class="secondary" id="todayWeek">Hoy</button>
+          <button type="button" class="secondary" id="nextWeek">Siguiente</button>
+        </div>
+      </div>
 
       <div class="calendar-toolbar">
         <div>
           <h2 id="calendarTitle">Reservas</h2>
           <span class="muted">Selecciona un horario libre para crear una reserva.</span>
-        </div>
-        <div class="toolbar-actions">
-          <button type="button" class="secondary" id="prevWeek">Anterior</button>
-          <button type="button" class="secondary" id="todayWeek">Hoy</button>
-          <button type="button" class="secondary" id="nextWeek">Siguiente</button>
         </div>
       </div>
 
@@ -1337,18 +1419,14 @@ include 'partials/header.php';
     </article>
   </section>
 
+  <?php if ($esAdministrador): ?>
   <section class="module" id="categorias">
-    <article class="panel">
-      <h2>Categor&iacute;as</h2>
-      <form action="guardar_categoria.php" method="post" class="grid compact">
-        <label>Nombre <input type="text" name="nombre" id="categoriaNombre" placeholder="Bebidas" required></label>
-        <button type="submit">Guardar categor&iacute;a</button>
-      </form>
-    </article>
-
-    <article class="panel">
-      <div class="section-header">
-        <h2>Listado de categor&iacute;as</h2>
+    <article class="panel categories-panel">
+      <div class="section-header categories-list-header">
+        <div class="title-actions">
+          <h2>Listado de categor&iacute;as</h2>
+          <button type="button" id="openCategoryListModal">Nueva categor&iacute;a</button>
+        </div>
         <div class="search-form">
           <input type="search" id="categoryListSearch" placeholder="Buscar categor&iacute;a, estado...">
           <span class="muted" id="categoryListCount"><?= count($categorias) ?> categor&iacute;a(s)</span>
@@ -1365,26 +1443,28 @@ include 'partials/header.php';
                 <td><?= e($categoria['nombre']) ?></td>
                 <td><span class="badge <?= e($categoria['estado']) ?>"><?= e($categoria['estado']) ?></span></td>
                 <td>
-                  <div class="actions">
+                  <div class="category-row-actions">
                     <button
                       type="button"
                       class="small secondary"
                       data-edit-category="<?= (int)$categoria['id'] ?>"
                       data-category-name="<?= e($categoria['nombre']) ?>"
                     >Editar</button>
-                    <?php if ($categoria['estado'] === 'activo'): ?>
-                      <form action="editar_categoria.php" method="post" class="inline-form">
-                        <input type="hidden" name="categoria_id" value="<?= (int)$categoria['id'] ?>">
-                        <input type="hidden" name="accion" value="desactivar">
-                        <button type="submit" class="small danger">Desactivar</button>
-                      </form>
-                    <?php else: ?>
-                      <form action="editar_categoria.php" method="post" class="inline-form">
-                        <input type="hidden" name="categoria_id" value="<?= (int)$categoria['id'] ?>">
-                        <input type="hidden" name="accion" value="activar">
-                        <button type="submit" class="small">Activar</button>
-                      </form>
-                    <?php endif; ?>
+                    <button
+                      type="button"
+                      class="small <?= $categoria['estado'] === 'activo' ? 'danger' : '' ?>"
+                      data-toggle-category
+                      data-id="<?= (int)$categoria['id'] ?>"
+                      data-nombre="<?= e($categoria['nombre']) ?>"
+                      data-estado="<?= e($categoria['estado']) ?>"
+                    ><?= $categoria['estado'] === 'activo' ? 'Desactivar' : 'Activar' ?></button>
+                    <button
+                      type="button"
+                      class="small danger"
+                      data-delete-category
+                      data-id="<?= (int)$categoria['id'] ?>"
+                      data-nombre="<?= e($categoria['nombre']) ?>"
+                    >Eliminar</button>
                   </div>
                 </td>
               </tr>
@@ -1396,63 +1476,51 @@ include 'partials/header.php';
       <nav class="pagination" id="categoryListPagination" aria-label="Paginacion de categorias"></nav>
     </article>
   </section>
+  <?php endif; ?>
 
   <section class="module" id="productos">
-    <article class="panel">
-      <h2>Productos</h2>
-      <form action="guardar_producto.php" method="post" class="grid compact">
-        <label>Nombre <input type="text" name="nombre" placeholder="Agua mineral" required></label>
-        <label>C&oacute;digo de barras <input type="text" name="codigo_barra" placeholder="Escanear o escribir"></label>
-        <div class="client-picker">
-          <label>Proveedor
-            <input type="hidden" name="proveedor_id" id="productProviderId">
-            <input type="search" id="productProviderSearch" autocomplete="off" placeholder="Sin proveedor">
-          </label>
-          <button type="button" class="add-client-button" data-open-quick-provider="product" title="Agregar proveedor">+</button>
-          <div class="autocomplete-list" id="productProviderSuggestions"></div>
+    <article class="panel products-panel" id="productosList">
+      <div class="section-header products-list-header">
+        <div class="title-actions">
+          <h2>Lista de productos</h2>
+          <?php if ($esAdministrador): ?>
+            <button type="button" id="openProductCreateModal">Nuevo producto</button>
+          <?php endif; ?>
         </div>
-        <div class="category-picker">
-          <label>Categor&iacute;a <input type="text" name="categoria" id="productoCategoria" autocomplete="off" placeholder="Bebidas"></label>
-          <button type="button" class="add-client-button" data-add-category="productoCategoria" title="Agregar categor&iacute;a">+</button>
-          <div class="autocomplete-list" data-category-suggestions-for="productoCategoria"></div>
-        </div>
-        <label>Precio compra unidad <input type="text" name="precio_compra" class="money-input" inputmode="numeric" value="0"></label>
-        <label>Precio unidad <input type="text" name="precio_venta" class="money-input" inputmode="numeric" required></label>
-        <label>Unidades por pack <input type="number" name="pack_cantidad" min="0" step="1" value="0"></label>
-        <label>Precio pack <input type="text" name="precio_pack" class="money-input" inputmode="numeric" value="0"></label>
-        <label>Stock inicial <input type="number" name="stock" min="0" step="1" required></label>
-        <button type="submit">Guardar producto</button>
-      </form>
-    </article>
-
-    <article class="panel" id="productosList">
-      <div class="section-header">
-        <div>
-          <h2>Inventario simple</h2>
+        <div class="search-form" id="productSearchForm">
+          <input type="search" name="producto_buscar" id="productInventorySearch" value="<?= e($productoBuscar) ?>" placeholder="Buscar producto, proveedor, c&oacute;digo...">
           <span class="muted" id="productInventoryCount"><?= $productosTotal ?> producto(s)<?= $productoBuscar !== '' ? ' encontrados' : '' ?></span>
         </div>
-        <form action="index.php#productos-list" method="get" class="search-form" id="productSearchForm">
-          <input type="search" name="producto_buscar" id="productInventorySearch" value="<?= e($productoBuscar) ?>" placeholder="Buscar producto, proveedor, c&oacute;digo...">
-          <button type="submit">Buscar</button>
-          <?php if ($productoBuscar !== ''): ?>
-            <a class="btn secondary" href="index.php#productos-list">Limpiar</a>
-          <?php endif; ?>
-        </form>
       </div>
-      <table>
-        <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Unidad</th><th>Pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
+      <table class="<?= $esAdministrador ? 'products-admin-table' : 'products-readonly-table' ?>">
+        <?php if ($esAdministrador): ?>
+          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Compra unidad</th><th>Venta unidad</th><th>Compra pack</th><th>Venta pack</th><th>Stock</th><th>Estado</th><th>Acciones</th></tr></thead>
+        <?php else: ?>
+          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Proveedor</th><th>Categor&iacute;a</th><th>Venta unidad</th><th>Venta pack</th><th>Stock</th><th>Estado</th></tr></thead>
+        <?php endif; ?>
         <tbody id="productInventoryRows">
           <?php if (empty($productosInventario)): ?>
-            <tr><td colspan="10">Todav&iacute;a no hay productos cargados.</td></tr>
+            <tr><td colspan="<?= $esAdministrador ? 11 : 8 ?>">Todav&iacute;a no hay productos cargados.</td></tr>
           <?php else: ?>
             <?php foreach ($productosInventario as $producto): ?>
-              <tr>
+              <tr data-product-row>
                 <td><?= e($producto['nombre']) ?></td>
                 <td><?= e($producto['codigo_barra'] ?: '-') ?></td>
                 <td><?= e($producto['proveedor'] ?: '-') ?></td>
                 <td><?= e($producto['categoria'] ?: '-') ?></td>
+                <?php if ($esAdministrador): ?>
                 <td><?= formatearGuaranies($producto['precio_compra']) ?></td>
+                <?php endif; ?>
                 <td><?= formatearGuaranies($producto['precio_venta']) ?></td>
+                <?php if ($esAdministrador): ?>
+                <td>
+                  <?php if ((int)$producto['pack_cantidad'] > 0): ?>
+                    <?= formatearGuaranies($producto['precio_compra_pack']) ?>
+                  <?php else: ?>
+                    -
+                  <?php endif; ?>
+                </td>
+                <?php endif; ?>
                 <td>
                   <?php if ((int)$producto['pack_cantidad'] > 0): ?>
                     <?= (int)$producto['pack_cantidad'] ?> un. / <?= formatearGuaranies($producto['precio_pack']) ?>
@@ -1462,18 +1530,28 @@ include 'partials/header.php';
                 </td>
                 <td><?= (int)$producto['stock'] ?></td>
                 <td><span class="badge <?= e($producto['estado']) ?>"><?= e($producto['estado']) ?></span></td>
+                <?php if ($esAdministrador): ?>
                 <td>
-                  <div class="actions">
+                  <div class="product-row-actions">
                     <button type="button" class="small secondary" data-edit-product="<?= (int)$producto['id'] ?>">Editar</button>
-                    <form action="cambiar_estado_producto.php" method="post" class="inline-form">
-                      <input type="hidden" name="producto_id" value="<?= (int)$producto['id'] ?>">
-                      <input type="hidden" name="estado" value="<?= $producto['estado'] === 'activo' ? 'inactivo' : 'activo' ?>">
-                      <button type="submit" class="small <?= $producto['estado'] === 'activo' ? 'danger' : '' ?>">
-                        <?= $producto['estado'] === 'activo' ? 'Desactivar' : 'Activar' ?>
-                      </button>
-                    </form>
+                    <button
+                      type="button"
+                      class="small <?= $producto['estado'] === 'activo' ? 'danger' : '' ?>"
+                      data-toggle-product
+                      data-id="<?= (int)$producto['id'] ?>"
+                      data-nombre="<?= e($producto['nombre']) ?>"
+                      data-estado="<?= e($producto['estado']) ?>"
+                    ><?= $producto['estado'] === 'activo' ? 'Desactivar' : 'Activar' ?></button>
+                    <button
+                      type="button"
+                      class="small danger"
+                      data-delete-product
+                      data-id="<?= (int)$producto['id'] ?>"
+                      data-nombre="<?= e($producto['nombre']) ?>"
+                    >Eliminar</button>
                   </div>
                 </td>
+                <?php endif; ?>
               </tr>
             <?php endforeach; ?>
           <?php endif; ?>
@@ -1494,6 +1572,7 @@ include 'partials/header.php';
     </article>
   </section>
 
+  <?php if ($esAdministrador): ?>
   <section class="module" id="compras">
     <article class="panel">
       <div class="section-header">
@@ -1539,7 +1618,7 @@ include 'partials/header.php';
           </select>
         </label>
         <input type="hidden" id="purchaseTotal" value="0">
-        <button type="button" class="secondary purchase-add-button" id="addPurchaseItem">Agregar producto</button>
+        <button type="button" class="secondary purchase-add-button" id="addPurchaseItem" disabled>Agregar producto</button>
         <button type="button" class="secondary" id="cancelPurchaseEdit" hidden>Cancelar edici&oacute;n</button>
         <div class="cart-list wide" id="purchaseCartList"></div>
         <div id="purchaseCartInputs"></div>
@@ -1554,22 +1633,19 @@ include 'partials/header.php';
           <h2>&Uacute;ltimas compras</h2>
           <span class="muted" id="purchaseSearchCount"><?= $comprasTotal ?> compra(s)<?= $compraBuscar !== '' ? ' encontradas' : '' ?></span>
         </div>
-        <form action="index.php#compras-list" method="get" class="search-form" id="purchaseSearchForm">
+        <div class="search-form" id="purchaseSearchForm">
           <input type="search" name="compra_buscar" id="purchaseListSearch" value="<?= e($compraBuscar) ?>" placeholder="Buscar proveedor, producto, estado...">
-          <button type="submit">Buscar</button>
-          <?php if ($compraBuscar !== ''): ?>
-            <a class="btn secondary" href="index.php#compras-list">Limpiar</a>
-          <?php endif; ?>
-        </form>
+        </div>
       </div>
       <table>
-        <thead><tr><th>Fecha</th><th>Proveedor</th><th>Resumen</th><th>M&eacute;todo</th><th>Estado</th><th>Total</th></tr></thead>
+        <thead><tr><th>ID</th><th>Fecha</th><th>Proveedor</th><th>Resumen</th><th>M&eacute;todo</th><th>Estado</th><th>Total</th></tr></thead>
         <tbody id="purchaseListRows">
           <?php if (empty($compras)): ?>
-            <tr><td colspan="6">Sin compras registradas.</td></tr>
+            <tr><td colspan="7">Sin compras registradas.</td></tr>
           <?php else: ?>
             <?php foreach ($compras as $compra): ?>
               <tr class="clickable-row <?= $compra['estado'] === 'anulada' ? 'sale-canceled' : '' ?>" data-purchase-id="<?= (int)$compra['id'] ?>">
+                <td>#<?= (int)$compra['id'] ?></td>
                 <td><?= e(date('d/m/Y H:i', strtotime($compra['fecha_compra']))) ?></td>
                 <td><?= e($compra['proveedor'] ?: 'Sin proveedor') ?></td>
                 <td>
@@ -1599,6 +1675,7 @@ include 'partials/header.php';
     </article>
   </section>
 
+  <?php endif; ?>
   <section class="module" id="ventas">
     <article class="panel">
       <div class="section-header">
@@ -1646,7 +1723,7 @@ include 'partials/header.php';
           </select>
         </label>
         <label>Total estimado <input type="text" id="ventaTotal" value="0" readonly></label>
-        <button type="button" class="secondary" id="addSaleItem" <?= !$cajaAbiertaHoy ? 'disabled' : '' ?>>Agregar producto</button>
+        <button type="button" class="secondary" id="addSaleItem" disabled>Agregar producto</button>
         <button type="button" class="secondary" id="cancelSaleEdit" hidden>Cancelar edici&oacute;n</button>
         <div class="cart-list wide" id="saleCartList"></div>
         <div id="saleCartInputs"></div>
@@ -1659,19 +1736,15 @@ include 'partials/header.php';
       <div class="section-header">
         <div>
           <h2>&Uacute;ltimas ventas</h2>
-          <span class="muted"><?= $ventasTotal ?> venta(s)<?= $ventaBuscar !== '' ? ' encontradas' : '' ?></span>
+          <span class="muted" id="saleSearchCount"><?= $ventasTotal ?> venta(s)<?= $ventaBuscar !== '' ? ' encontradas' : '' ?></span>
         </div>
-        <form action="index.php#ventas-list" method="get" class="search-form">
-          <input type="search" name="venta_buscar" value="<?= e($ventaBuscar) ?>" placeholder="Buscar cliente, producto, estado...">
-          <button type="submit">Buscar</button>
-          <?php if ($ventaBuscar !== ''): ?>
-            <a class="btn secondary" href="index.php#ventas-list">Limpiar</a>
-          <?php endif; ?>
-        </form>
+        <div class="search-form" id="saleSearchForm">
+          <input type="search" name="venta_buscar" id="saleListSearch" value="<?= e($ventaBuscar) ?>" placeholder="Buscar cliente, producto, estado...">
+        </div>
       </div>
       <table>
         <thead><tr><th>ID</th><th>Fecha</th><th>Cliente</th><th>Resumen</th><th>M&eacute;todo</th><th>Estado</th><th>Total</th></tr></thead>
-        <tbody>
+        <tbody id="saleListRows">
           <?php if (empty($ventas)): ?>
             <tr><td colspan="7">Sin ventas registradas.</td></tr>
           <?php else: ?>
@@ -1682,7 +1755,7 @@ include 'partials/header.php';
                 <td><?= e($venta['cliente'] ?: 'Sin cliente') ?></td>
                 <td>
                   <?= (int)$venta['items'] ?> producto(s)
-                  <span><?= (int)$venta['unidades'] ?> unidad(es)<?= $venta['reserva_cancha'] ? ' - ' . e($venta['reserva_cancha']) : '' ?></span>
+                  <span><?= (int)$venta['unidades'] ?> unidad(es)<?= $venta['reserva_cancha'] ? ' - ' . e($venta['reserva_cancha']) . ' - R#' . (int)$venta['reserva_id'] : '' ?></span>
                 </td>
                 <td><?= e($venta['metodo']) ?></td>
                 <td><span class="badge <?= e($venta['estado']) ?>"><?= e($venta['estado']) ?></span></td>
@@ -1693,7 +1766,7 @@ include 'partials/header.php';
         </tbody>
       </table>
       <?php if ($ventasPaginas > 1): ?>
-        <nav class="pagination" aria-label="Paginacion de ventas">
+        <nav class="pagination" id="saleListPagination" aria-label="Paginacion de ventas">
           <?php
             $ventaQueryBase = $ventaBuscar !== '' ? ['venta_buscar' => $ventaBuscar] : [];
             $ventaAnterior = max(1, $ventaPagina - 1);
@@ -1707,6 +1780,7 @@ include 'partials/header.php';
     </article>
   </section>
 
+  <?php if ($esAdministrador): ?>
   <section class="module" id="configuracion">
     <article class="panel">
       <div class="section-header">
@@ -1737,7 +1811,7 @@ include 'partials/header.php';
         </label>
         <label>Rol
           <select name="rol">
-            <option value="usuario">Usuario</option>
+            <option value="secretario">Secretario</option>
             <option value="administrador">Administrador</option>
           </select>
         </label>
@@ -1798,8 +1872,10 @@ include 'partials/header.php';
       </table>
     </article>
   </section>
+  <?php endif; ?>
 </main>
 
+<?php if ($esAdministrador): ?>
 <div class="modal-backdrop" id="userEditModal" aria-hidden="true">
   <section class="modal">
     <header class="modal-header">
@@ -1823,7 +1899,7 @@ include 'partials/header.php';
       <p class="muted">La contrase&ntilde;a actual no se puede mostrar porque se guarda cifrada. Escribe una nueva solo si deseas cambiarla.</p>
       <label>Rol
         <select name="rol" id="editUserRole">
-          <option value="usuario">Usuario</option>
+          <option value="secretario">Secretario</option>
           <option value="administrador">Administrador</option>
         </select>
       </label>
@@ -1840,6 +1916,7 @@ include 'partials/header.php';
     </form>
   </section>
 </div>
+<?php endif; ?>
 
 <?php foreach ($cajaCierresRecientes as $cierre): ?>
   <?php $detalleCierre = $cajaCierresDetalle[(int)$cierre['id']] ?? ['movimientos' => []]; ?>
@@ -1854,7 +1931,9 @@ include 'partials/header.php';
           <dl>
             <div><dt>Fecha</dt><dd><?= e(date('d/m/Y', strtotime($cierre['fecha']))) ?></dd></div>
             <div><dt>Apertura</dt><dd><?= e(date('H:i', strtotime($cierre['abierta_en']))) ?></dd></div>
+            <div><dt>Usuario apertura</dt><dd><?= e(($cierre['usuario_apertura_nombre'] ?? $cierre['usuario_apertura_usuario'] ?? '') ?: 'Sin usuario registrado') ?></dd></div>
             <div><dt>Cierre</dt><dd><?= e(date('H:i', strtotime($cierre['cerrada_en']))) ?></dd></div>
+            <div><dt>Usuario cierre</dt><dd><?= e(($cierre['usuario_cierre_nombre'] ?? $cierre['usuario_cierre_usuario'] ?? '') ?: 'Sin usuario registrado') ?></dd></div>
             <div><dt>Monto inicial</dt><dd><?= formatearGuaranies($cierre['monto_inicial']) ?></dd></div>
             <div><dt>Saldo esperado</dt><dd><?= formatearGuaranies($detalleCierre['esperado_total'] ?? 0) ?></dd></div>
             <div><dt>Total contado</dt><dd><?= formatearGuaranies($detalleCierre['total_contado'] ?? 0) ?></dd></div>
@@ -1913,8 +1992,13 @@ include 'partials/header.php';
 
       <div class="modal-summary" id="modalSummary">
         <span id="modalSummaryText"></span>
-        <input type="number" id="modalReservationDuration" min="1" step="1" value="1" aria-label="Horas de reserva">
-        <span>hora(s)</span>
+        <label>Inicio
+          <select id="modalHoraInicioVisible" aria-label="Hora de inicio"></select>
+        </label>
+        <label>Fin
+          <select id="modalHoraFinVisible" aria-label="Hora de fin"></select>
+        </label>
+        <span class="duration-display" id="modalReservationDuration">1 hora</span>
       </div>
 
       <div class="client-picker">
@@ -1947,7 +2031,6 @@ include 'partials/header.php';
           </select>
         </label>
       </div>
-      <label>Detalle <textarea name="observacion" rows="2" class="compact-detail"></textarea></label>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cerrar</button>
         <button type="submit">Guardar</button>
@@ -1965,12 +2048,73 @@ include 'partials/header.php';
     <form class="modal-body" id="quickClientForm">
       <label>Nombre <input type="text" name="nombre" id="quickClientName" required></label>
       <div class="duplicate-warning" id="quickClientDuplicateName"></div>
-      <label>Telefono <input type="text" name="telefono"></label>
+      <label>Telefono <input type="text" name="telefono" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" data-digits-only data-max-digits="10" required></label>
       <label>Email <input type="email" name="email"></label>
-      <label>Documento <input type="text" name="documento"></label>
+      <label>Documento o RUC <input type="text" name="documento" inputmode="numeric" pattern="[0-9-]*" data-ruc-input></label>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-quick-client>Cerrar</button>
         <button type="submit">Guardar cliente</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="editClientModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2>Editar cliente</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="editar_cliente.php" method="post" class="modal-body" id="editClientForm">
+      <label>Nombre <input type="text" name="nombre" id="editClientName" required></label>
+      <label>Telefono <input type="text" name="telefono" id="editClientPhone" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" data-digits-only data-max-digits="10" required></label>
+      <label>Email <input type="email" name="email" id="editClientEmail"></label>
+      <label>Documento o RUC <input type="text" name="documento" id="editClientDocument" inputmode="numeric" pattern="[0-9-]*" data-ruc-input></label>
+      <label>Direccion <input type="text" name="direccion" id="editClientAddress"></label>
+      <label>Estado
+        <select name="estado" id="editClientStatus">
+          <option value="activo">Activo</option>
+          <option value="inactivo">Inactivo</option>
+        </select>
+      </label>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cerrar</button>
+        <button type="submit">Actualizar</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="toggleClientModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2 id="toggleClientTitle">Cambiar estado</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="cambiar_estado_cliente.php" method="post" class="modal-body">
+      <input type="hidden" name="id" id="toggleClientId">
+      <input type="hidden" name="estado" id="toggleClientStatus">
+      <p class="modal-message" id="toggleClientText">Cambiar estado del cliente?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" id="toggleClientSubmit">Confirmar</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="deleteClientModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2>Eliminar cliente</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="eliminar_cliente.php" method="post" class="modal-body">
+      <input type="hidden" name="id" id="deleteClientId">
+      <p class="modal-message" id="deleteClientText">Eliminar este cliente?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" class="danger">Eliminar</button>
       </footer>
     </form>
   </section>
@@ -1984,9 +2128,9 @@ include 'partials/header.php';
     </header>
     <form class="modal-body" id="quickProviderForm">
       <label>Nombre <input type="text" name="nombre" id="quickProviderName" required></label>
-      <label>Tel&eacute;fono <input type="text" name="telefono"></label>
+      <label>Tel&eacute;fono <input type="text" name="telefono" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" data-digits-only data-max-digits="10"></label>
       <label>Email <input type="email" name="email"></label>
-      <label>RUC / Documento <input type="text" name="ruc"></label>
+      <label>RUC / Documento <input type="text" name="ruc" inputmode="numeric" pattern="[0-9-]*" data-ruc-input></label>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-quick-provider>Cerrar</button>
         <button type="submit">Guardar proveedor</button>
@@ -2004,6 +2148,7 @@ include 'partials/header.php';
     <form class="modal-body" id="quickProductForm">
       <div class="grid compact">
         <label>Nombre <input type="text" name="nombre" id="quickProductName" required></label>
+        <div class="duplicate-warning product-duplicate-warning" id="quickProductDuplicateName"></div>
         <label>C&oacute;digo de barras <input type="text" name="codigo_barra" placeholder="Escanear o escribir"></label>
         <div class="client-picker">
           <label>Proveedor
@@ -2014,14 +2159,15 @@ include 'partials/header.php';
           <div class="autocomplete-list" id="quickProductProviderSuggestions"></div>
         </div>
         <div class="category-picker">
-          <label>Categor&iacute;a <input type="text" name="categoria" id="quickProductCategoria" autocomplete="off"></label>
+          <label>Categor&iacute;a <input type="text" name="categoria" id="quickProductCategoria" autocomplete="off" required></label>
           <button type="button" class="add-client-button" data-add-category="quickProductCategoria" title="Agregar categor&iacute;a">+</button>
           <div class="autocomplete-list" data-category-suggestions-for="quickProductCategoria"></div>
         </div>
-        <label>Precio compra unidad <input type="text" name="precio_compra" id="quickProductCompra" class="money-input" inputmode="numeric" value="0"></label>
-        <label>Precio unidad <input type="text" name="precio_venta" class="money-input" inputmode="numeric" value="0"></label>
         <label>Unidades por pack <input type="number" name="pack_cantidad" id="quickProductPackQuantity" min="0" step="1" value="0"></label>
-        <label>Precio pack <input type="text" name="precio_pack" class="money-input" inputmode="numeric" value="0"></label>
+        <label>Precio compra pack <input type="text" name="precio_compra_pack" id="quickProductCompraPack" class="money-input" inputmode="numeric" value="0"></label>
+        <label>Precio de venta pack <input type="text" name="precio_pack" id="quickProductPackPrecio" class="money-input" inputmode="numeric" value="0"><small class="price-below-cost-warning" data-price-warning="pack" hidden></small></label>
+        <label>Precio compra unidad <input type="text" name="precio_compra" id="quickProductCompra" class="money-input" inputmode="numeric" value="0" data-positive-money></label>
+        <label>Precio de venta unidad <input type="text" name="precio_venta" id="quickProductVenta" class="money-input" inputmode="numeric" value="0" data-positive-money><small class="price-below-cost-warning" data-price-warning="unit" hidden></small></label>
         <label>Stock inicial <input type="number" name="stock" id="quickProductStock" min="0" step="1" value="0"></label>
       </div>
       <footer class="modal-footer">
@@ -2053,10 +2199,10 @@ include 'partials/header.php';
 <div class="modal-backdrop" id="courtModal" aria-hidden="true">
   <section class="modal small-modal">
     <header class="modal-header">
-      <h2>Editar cancha</h2>
+      <h2 id="courtModalTitle">Editar cancha</h2>
       <button type="button" class="icon-button" data-close-modal>&times;</button>
     </header>
-    <form action="editar_cancha.php" method="post" class="modal-body">
+    <form action="editar_cancha.php" method="post" class="modal-body" id="courtForm">
       <input type="hidden" name="cancha_id" id="editCanchaModalId">
       <label>Nombre <input type="text" name="nombre" id="editCanchaNombre" required></label>
       <label>Tipo <input type="text" name="tipo" id="editCanchaTipo"></label>
@@ -2070,14 +2216,31 @@ include 'partials/header.php';
       </label>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cerrar</button>
-        <button type="submit">Guardar cambios</button>
+        <button type="submit" id="courtSubmitButton">Guardar cambios</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="deleteCourtModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2>Eliminar cancha</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="eliminar_cancha.php" method="post" class="modal-body">
+      <input type="hidden" name="cancha_id" id="deleteCanchaId">
+      <p class="modal-message" id="deleteCanchaText">Eliminar esta cancha?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" class="danger">Eliminar</button>
       </footer>
     </form>
   </section>
 </div>
 
 <div class="modal-backdrop" id="providerModal" aria-hidden="true">
-  <section class="modal">
+  <section class="modal small-modal">
     <header class="modal-header">
       <h2>Editar proveedor</h2>
       <button type="button" class="icon-button" data-close-modal>&times;</button>
@@ -2087,9 +2250,9 @@ include 'partials/header.php';
       <input type="hidden" name="proveedor_id" id="editProveedorId">
       <div class="grid compact">
         <label>Nombre <input type="text" name="nombre" id="editProveedorNombre" required></label>
-        <label>Tel&eacute;fono <input type="text" name="telefono" id="editProveedorTelefono"></label>
+        <label>Tel&eacute;fono <input type="text" name="telefono" id="editProveedorTelefono" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" data-digits-only data-max-digits="10"></label>
         <label>Email <input type="email" name="email" id="editProveedorEmail"></label>
-        <label>RUC / Documento <input type="text" name="ruc" id="editProveedorRuc"></label>
+        <label>RUC / Documento <input type="text" name="ruc" id="editProveedorRuc" inputmode="numeric" pattern="[0-9-]*" data-ruc-input></label>
         <label>Estado
           <select name="estado" id="editProveedorEstado" required>
             <option value="activo">Activo</option>
@@ -2097,11 +2260,29 @@ include 'partials/header.php';
           </select>
         </label>
         <label class="wide">Direcci&oacute;n <input type="text" name="direccion" id="editProveedorDireccion"></label>
-        <label class="wide">Notas <textarea name="notas" id="editProveedorNotas" rows="3"></textarea></label>
       </div>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cerrar</button>
         <button type="submit">Guardar cambios</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="toggleProviderModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2 id="toggleProviderTitle">Cambiar estado</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="editar_proveedor.php" method="post" class="modal-body">
+      <input type="hidden" name="accion" value="estado">
+      <input type="hidden" name="proveedor_id" id="toggleProviderId">
+      <input type="hidden" name="estado" id="toggleProviderStatus">
+      <p class="modal-message" id="toggleProviderText">Cambiar estado del proveedor?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" id="toggleProviderSubmit">Confirmar</button>
       </footer>
     </form>
   </section>
@@ -2127,13 +2308,14 @@ include 'partials/header.php';
   <div class="modal-backdrop" id="productModal" aria-hidden="true">
   <section class="modal">
     <header class="modal-header">
-      <h2>Editar producto</h2>
+      <h2 id="productModalTitle">Editar producto</h2>
       <button type="button" class="icon-button" data-close-modal>&times;</button>
     </header>
-    <form action="editar_producto.php" method="post" class="modal-body">
+    <form action="editar_producto.php" method="post" class="modal-body" id="productForm">
       <input type="hidden" name="producto_id" id="editProductoId">
       <div class="grid compact">
         <label>Nombre <input type="text" name="nombre" id="editProductoNombre" required></label>
+        <div class="duplicate-warning product-duplicate-warning" id="editProductDuplicateName"></div>
         <label>C&oacute;digo de barras <input type="text" name="codigo_barra" id="editProductoCodigo"></label>
         <div class="client-picker">
           <label>Proveedor
@@ -2144,14 +2326,15 @@ include 'partials/header.php';
           <div class="autocomplete-list" id="editProductoProveedorSuggestions"></div>
         </div>
         <div class="category-picker">
-          <label>Categor&iacute;a <input type="text" name="categoria" id="editProductoCategoria" autocomplete="off"></label>
+          <label>Categor&iacute;a <input type="text" name="categoria" id="editProductoCategoria" autocomplete="off" required></label>
           <button type="button" class="add-client-button" data-add-category="editProductoCategoria" title="Agregar categor&iacute;a">+</button>
           <div class="autocomplete-list" data-category-suggestions-for="editProductoCategoria"></div>
         </div>
-        <label>Precio compra unidad <input type="text" name="precio_compra" id="editProductoCompra" class="money-input" inputmode="numeric" required></label>
-        <label>Precio unidad <input type="text" name="precio_venta" id="editProductoVenta" class="money-input" inputmode="numeric" required></label>
         <label>Unidades por pack <input type="number" name="pack_cantidad" id="editProductoPackCantidad" min="0" step="1" required></label>
-        <label>Precio pack <input type="text" name="precio_pack" id="editProductoPackPrecio" class="money-input" inputmode="numeric" required></label>
+        <label>Precio compra pack <input type="text" name="precio_compra_pack" id="editProductoCompraPack" class="money-input" inputmode="numeric" required></label>
+        <label>Precio de venta pack <input type="text" name="precio_pack" id="editProductoPackPrecio" class="money-input" inputmode="numeric" required><small class="price-below-cost-warning" data-price-warning="pack" hidden></small></label>
+        <label>Precio compra unidad <input type="text" name="precio_compra" id="editProductoCompra" class="money-input" inputmode="numeric" required data-positive-money></label>
+        <label>Precio de venta unidad <input type="text" name="precio_venta" id="editProductoVenta" class="money-input" inputmode="numeric" required data-positive-money><small class="price-below-cost-warning" data-price-warning="unit" hidden></small></label>
         <label>Stock <input type="number" name="stock" id="editProductoStock" min="0" step="1" required></label>
         <label>Estado
           <select name="estado" id="editProductoEstado" required>
@@ -2162,7 +2345,42 @@ include 'partials/header.php';
       </div>
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cerrar</button>
-        <button type="submit">Guardar cambios</button>
+        <button type="submit" id="productSubmitButton">Guardar cambios</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="toggleProductModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2 id="toggleProductTitle">Cambiar estado</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="cambiar_estado_producto.php" method="post" class="modal-body">
+      <input type="hidden" name="producto_id" id="toggleProductId">
+      <input type="hidden" name="estado" id="toggleProductStatus">
+      <p class="modal-message" id="toggleProductText">Cambiar estado del producto?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" id="toggleProductSubmit">Confirmar</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="deleteProductModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2>Eliminar producto</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="eliminar_producto.php" method="post" class="modal-body">
+      <input type="hidden" name="producto_id" id="deleteProductId">
+      <p class="modal-message" id="deleteProductText">Eliminar este producto?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" class="danger">Eliminar</button>
       </footer>
     </form>
   </section>
@@ -2196,6 +2414,7 @@ include 'partials/header.php';
         <input type="hidden" name="fecha" value="<?= e($cajaFecha) ?>">
         <input type="hidden" name="abono_pendiente_id" id="confirmPendingReceiptId">
         <input type="hidden" name="reserva_id" id="confirmPendingReceiptReservaId">
+        <input type="hidden" name="volver" id="confirmPendingReceiptVolver" value="reservas">
       </form>
       <footer class="modal-footer">
         <button type="submit" form="confirmPendingReceiptForm" id="confirmPendingReceiptButton" hidden>Confirmado</button>
@@ -2221,6 +2440,41 @@ include 'partials/header.php';
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cerrar</button>
         <button type="submit" id="categorySubmitButton">Guardar categor&iacute;a</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="toggleCategoryModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2 id="toggleCategoryTitle">Cambiar estado</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="editar_categoria.php" method="post" class="modal-body">
+      <input type="hidden" name="categoria_id" id="toggleCategoryId">
+      <input type="hidden" name="accion" id="toggleCategoryAction">
+      <p class="modal-message" id="toggleCategoryText">Cambiar estado de la categor&iacute;a?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" id="toggleCategorySubmit">Confirmar</button>
+      </footer>
+    </form>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="deleteCategoryModal" aria-hidden="true">
+  <section class="modal small-modal">
+    <header class="modal-header">
+      <h2>Eliminar categor&iacute;a</h2>
+      <button type="button" class="icon-button" data-close-modal>&times;</button>
+    </header>
+    <form action="eliminar_categoria.php" method="post" class="modal-body">
+      <input type="hidden" name="categoria_id" id="deleteCategoryId">
+      <p class="modal-message" id="deleteCategoryText">Eliminar esta categor&iacute;a?</p>
+      <footer class="modal-footer">
+        <button type="button" class="secondary" data-close-modal>Cancelar</button>
+        <button type="submit" class="danger">Eliminar</button>
       </footer>
     </form>
   </section>
@@ -2256,6 +2510,24 @@ include 'partials/header.php';
       <footer class="modal-footer">
         <button type="button" class="secondary" data-close-modal>Cancelar</button>
         <button type="button" id="confirmSaleSubmit">Confirmar venta</button>
+      </footer>
+    </div>
+  </section>
+</div>
+
+<div class="modal-backdrop" id="saleTicketPreviewModal" aria-hidden="true">
+  <section class="modal ticket-preview-modal">
+    <header class="modal-header">
+      <h2>Vista previa del ticket</h2>
+      <button type="button" class="icon-button" id="closeSaleTicketPreview">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div class="ticket-preview-frame-wrap">
+        <iframe id="saleTicketPreviewFrame" title="Vista previa del ticket de venta"></iframe>
+      </div>
+      <footer class="modal-footer ticket-preview-actions">
+        <button type="button" class="secondary" id="cancelSaleTicketPrint">Cancelar</button>
+        <button type="button" id="printRegisteredSaleTicket">Imprimir</button>
       </footer>
     </div>
   </section>
@@ -2471,7 +2743,7 @@ include 'partials/header.php';
           <dl>
             <div><dt>Cliente</dt><dd><?= e($pagoTicket['cliente']) ?><?= $pagoTicket['telefono'] ? ' - ' . e($pagoTicket['telefono']) : '' ?></dd></div>
             <div><dt>Cancha</dt><dd><?= e($pagoTicket['cancha']) ?></dd></div>
-            <div><dt>Reserva</dt><dd>#<?= (int)$pagoTicket['reserva_id'] ?> - <?= e(date('d/m/Y', strtotime($pagoTicket['fecha']))) ?> de <?= e(substr($pagoTicket['hora_inicio'], 0, 5)) ?> a <?= e(substr($pagoTicket['hora_fin'], 0, 5)) ?></dd></div>
+            <div><dt>Reserva</dt><dd>#<?= (int)$pagoTicket['reserva_id'] ?> - <?= e(date('d/m/Y', strtotime($pagoTicket['fecha']))) ?> de <?= e(substr($pagoTicket['hora_inicio'], 0, 5)) ?> a <?= e(substr($pagoTicket['hora_fin'], 0, 5) === '24:00' ? '00:00' : substr($pagoTicket['hora_fin'], 0, 5)) ?></dd></div>
             <div><dt>Alquiler</dt><dd><?= formatearGuaranies($pagoTicket['precio_total']) ?></dd></div>
             <div><dt>Consumos</dt><dd><?= formatearGuaranies($pagoTicket['consumo_total']) ?></dd></div>
             <div><dt>Total reserva</dt><dd><?= formatearGuaranies($pagoTicket['total_reserva']) ?></dd></div>
@@ -2500,17 +2772,23 @@ include 'partials/header.php';
     </header>
     <div class="modal-body">
       <div class="reservation-detail" id="reservationDetail"></div>
+      <div class="reservation-section-tabs" role="tablist" aria-label="Acciones de la reserva">
+        <button type="button" class="reservation-section-tab" data-reservation-section="reservationEditSection" aria-controls="reservationEditSection" aria-selected="false">Editar reserva</button>
+        <button type="button" class="reservation-section-tab" data-reservation-section="reservationPaymentSection" aria-controls="reservationPaymentSection" aria-selected="false">Registrar pago</button>
+        <button type="button" class="reservation-section-tab" data-reservation-section="reservationConsumptionSection" aria-controls="reservationConsumptionSection" aria-selected="false">Registrar consumo</button>
+      </div>
       <details class="modal-section" id="reservationEditSection">
         <summary>Editar reserva</summary>
         <form action="editar_reserva.php" method="post" class="grid compact" id="reservationEditForm">
           <input type="hidden" name="reserva_id" id="editReservaId">
-          <label>Cliente
-            <select name="cliente_id" id="editClienteId" required>
-              <?php foreach ($clientes as $cliente): ?>
-                <option value="<?= (int)$cliente['id'] ?>"><?= e($cliente['nombre']) ?> - <?= e($cliente['telefono']) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </label>
+          <div class="client-picker">
+            <label>Cliente
+              <input type="hidden" name="cliente_id" id="editClienteId" required>
+              <input type="search" id="editClientSearch" autocomplete="off" placeholder="Buscar por nombre o telefono" required>
+            </label>
+            <button type="button" class="add-client-button" id="openEditQuickClient" title="Agregar cliente">+</button>
+            <div class="autocomplete-list" id="editClientSuggestions"></div>
+          </div>
           <label>Cancha
             <select name="cancha_id" id="editCanchaId" required>
               <?php foreach ($canchas as $cancha): ?>
@@ -2519,15 +2797,15 @@ include 'partials/header.php';
             </select>
           </label>
           <label>Fecha <input type="date" name="fecha" id="editFecha" min="<?= e($hoy) ?>" required></label>
+          <label>Precio total <input type="text" name="precio_total" id="editPrecioTotal" class="money-input" inputmode="numeric" required readonly></label>
           <label>Hora inicio
-            <input type="text" id="editHoraInicioHour" inputmode="numeric" pattern="^([0-1]?[0-9]|2[0-3]):00$" required>
+            <select id="editHoraInicioHour" required></select>
             <input type="hidden" name="hora_inicio" id="editHoraInicio">
           </label>
           <label>Hora fin
-            <input type="text" id="editHoraFinHour" inputmode="numeric" pattern="^([0-1]?[0-9]|2[0-4]):00$" required>
+            <select id="editHoraFinHour" required></select>
             <input type="hidden" name="hora_fin" id="editHoraFin">
           </label>
-          <label>Precio total <input type="text" name="precio_total" id="editPrecioTotal" class="money-input" inputmode="numeric" required></label>
           <label>Estado
             <select name="estado" id="editEstado" required>
               <option value="reservado">Reservado</option>
@@ -2536,7 +2814,6 @@ include 'partials/header.php';
               <option value="cancelado" id="editEstadoCancelado">Cancelado</option>
             </select>
           </label>
-          <label class="wide">Observaci&oacute;n <textarea name="observacion" id="editObservacion" rows="3"></textarea></label>
           <button type="submit">Guardar cambios</button>
         </form>
       </details>
@@ -2595,7 +2872,6 @@ include 'partials/header.php';
           <button type="button" class="secondary" id="addReservationSaleItem" <?= !$cajaAbiertaHoy ? 'disabled' : '' ?>>Agregar producto</button>
           <div class="cart-list wide" id="reservationSaleCartList"></div>
           <div id="reservationSaleCartInputs"></div>
-          <label class="wide">Observaci&oacute;n <textarea name="observacion" rows="2" placeholder="Ej. bebidas del turno"></textarea></label>
           <button type="submit" <?= !$cajaAbiertaHoy ? 'disabled' : '' ?>>Registrar consumo</button>
         </form>
       </details>
@@ -2616,7 +2892,7 @@ include 'partials/header.php';
   const initialReservationDetailId = <?= (int)$reservaDetalleId ?>;
   const products = <?= json_encode($productos, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   let productCategories = <?= json_encode(array_column($categoriasActivas, 'nombre'), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
-  const sales = <?= json_encode($ventas, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
+  const sales = <?= json_encode($todasVentas, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const saleDetails = <?= json_encode($ventaDetalles, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const purchases = <?= json_encode($todasCompras, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
   const purchaseDetails = <?= json_encode($compraDetalles, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT) ?>;
@@ -2625,6 +2901,8 @@ include 'partials/header.php';
     'fecha' => $cajaFecha,
     'estado' => $cajaJornada['estado'] ?? 'sin_abrir',
     'abierta_en' => $cajaJornada['abierta_en'] ?? null,
+    'usuario_apertura' => $cajaUsuarioApertura,
+    'usuario_cierre' => $cajaUsuarioCierre ?: (usuarioActual()['nombre'] ?? usuarioActual()['usuario'] ?? ''),
     'monto_inicial' => $cajaMontoInicial,
     'saldo_total' => $cajaSaldo,
     'saldo_efectivo' => $cajaSaldoEfectivo,
@@ -2638,6 +2916,8 @@ include 'partials/header.php';
       'estado' => $cierre['estado'],
       'abierta_en' => $cierre['abierta_en'],
       'cerrada_en' => $cierre['cerrada_en'],
+      'usuario_apertura' => ($cierre['usuario_apertura_nombre'] ?? $cierre['usuario_apertura_usuario'] ?? '') ?: 'Sin usuario registrado',
+      'usuario_cierre' => ($cierre['usuario_cierre_nombre'] ?? $cierre['usuario_cierre_usuario'] ?? '') ?: 'Sin usuario registrado',
       'monto_inicial' => (float)$cierre['monto_inicial'],
       'saldo_total' => (float)($detalle['esperado_total'] ?? 0),
       'saldo_efectivo' => (float)($detalle['esperado_efectivo'] ?? 0),
@@ -2669,6 +2949,7 @@ include 'partials/header.php';
   const detailModal = document.getElementById('detailModal');
   const courtModal = document.getElementById('courtModal');
   const providerModal = document.getElementById('providerModal');
+  const toggleProviderModal = document.getElementById('toggleProviderModal');
   const deleteProviderModal = document.getElementById('deleteProviderModal');
   const productModal = document.getElementById('productModal');
   const categoryModal = document.getElementById('categoryModal');
@@ -2693,6 +2974,7 @@ include 'partials/header.php';
   const saleVentaId = document.getElementById('saleVentaId');
   const saleFormTitle = document.getElementById('saleFormTitle');
   const saleSubmitButton = document.getElementById('saleSubmitButton');
+  const addSaleItemButton = document.getElementById('addSaleItem');
   const cancelSaleEdit = document.getElementById('cancelSaleEdit');
   const saleCheckoutModal = document.getElementById('saleCheckoutModal');
   const checkoutTotal = document.getElementById('checkoutTotal');
@@ -2700,6 +2982,8 @@ include 'partials/header.php';
   const checkoutReceived = document.getElementById('checkoutReceived');
   const checkoutChange = document.getElementById('checkoutChange');
   const checkoutPrintTicket = document.getElementById('checkoutPrintTicket');
+  const saleTicketPreviewModal = document.getElementById('saleTicketPreviewModal');
+  const saleTicketPreviewFrame = document.getElementById('saleTicketPreviewFrame');
   const cashCloseForm = document.getElementById('cashCloseForm');
   const cashCloseConfirmModal = document.getElementById('cashCloseConfirmModal');
   const confirmCashClose = document.getElementById('confirmCashClose');
@@ -2731,6 +3015,7 @@ include 'partials/header.php';
   const purchaseCompraId = document.getElementById('purchaseCompraId');
   const purchaseFormTitle = document.getElementById('purchaseFormTitle');
   const purchaseSubmitButton = document.getElementById('purchaseSubmitButton');
+  const addPurchaseItemButton = document.getElementById('addPurchaseItem');
   const cancelPurchaseEdit = document.getElementById('cancelPurchaseEdit');
   const purchaseProductId = document.getElementById('purchaseProduct');
   const purchaseProductSearch = document.getElementById('purchaseProductSearch');
@@ -2743,6 +3028,7 @@ include 'partials/header.php';
   const confirmPendingReceiptForm = document.getElementById('confirmPendingReceiptForm');
   const confirmPendingReceiptId = document.getElementById('confirmPendingReceiptId');
   const confirmPendingReceiptReservaId = document.getElementById('confirmPendingReceiptReservaId');
+  const confirmPendingReceiptVolver = document.getElementById('confirmPendingReceiptVolver');
   const confirmPendingReceiptButton = document.getElementById('confirmPendingReceiptButton');
   const cancelPurchaseId = document.getElementById('cancelPurchaseId');
   const cancelPurchaseButton = document.getElementById('cancelPurchaseButton');
@@ -2751,9 +3037,12 @@ include 'partials/header.php';
   const editPurchaseFromDetail = document.getElementById('editPurchaseFromDetail');
   let selectedSaleDetailId = null;
   let selectedPurchaseDetailId = null;
+  let purchaseEditInProgress = false;
   const confirmedPendingReceiptIds = new Set();
-  const hourStart = 7;
+  const hourStart = 13;
   const hourEnd = 24;
+  const slotStep = 0.5;
+  const minReservationDuration = 1;
   const dayNames = ['dom', 'lun', 'mar', 'mie', 'jue', 'vie', 'sab'];
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -2763,8 +3052,11 @@ include 'partials/header.php';
   let dragSelection = null;
   let reservationModalState = null;
   let selectedSaleProduct = null;
+  let lastSaleItemAddedAt = 0;
   let selectedReservationSaleProduct = null;
   let selectedPurchaseProduct = null;
+  let lastPurchaseItemAddedAt = 0;
+  let lastPurchaseEditStartedAt = 0;
   let saleCart = [];
   let reservationSaleCart = [];
   let purchaseCart = [];
@@ -2784,8 +3076,12 @@ include 'partials/header.php';
       'guardar_pago.php',
       'guardar_caja.php',
       'guardar_venta.php',
+      'guardar_compra.php',
+      'editar_compra.php',
       'guardar_reserva.php',
       'guardar_reserva_publica.php',
+      'guardar_producto.php',
+      'editar_producto.php',
       'anular_venta.php',
       'anular_compra.php'
     ].some((path) => action.includes(path));
@@ -2829,8 +3125,34 @@ include 'partials/header.php';
   function showModule(moduleId) {
     modules.forEach((module) => module.classList.toggle('active', module.id === moduleId));
     menuButtons.forEach((button) => button.classList.toggle('active', button.dataset.target === moduleId));
+    document.body.classList.toggle('reservas-view', moduleId === 'reservas');
     const url = new URL(window.location.href);
     history.replaceState(null, '', `${url.pathname}${url.search}#${moduleId}`);
+  }
+
+  function canAutoRefreshCashModule() {
+    if (document.hidden || location.hash !== '#caja') {
+      return false;
+    }
+
+    if (document.querySelector('.modal-backdrop.open')) {
+      return false;
+    }
+
+    const active = document.activeElement;
+    if (active && ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(active.tagName)) {
+      return false;
+    }
+
+    return !document.querySelector('form[data-submitting="1"]');
+  }
+
+  function refreshCashModuleIfIdle() {
+    if (!canAutoRefreshCashModule()) {
+      return;
+    }
+
+    window.location.reload();
   }
 
   function clearTransientUrlParams() {
@@ -2894,7 +3216,7 @@ include 'partials/header.php';
     const [year, month, day] = String(item.fecha).split('-').map(Number);
     const date = new Date(year, month - 1, day);
     const weekday = date.toLocaleDateString('es-PY', { weekday: 'long' });
-    return `${weekday} ${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')} de ${String(item.hora_inicio).slice(0, 5)} a ${String(item.hora_fin).slice(0, 5)}`;
+    return `${weekday} ${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')} de ${displayReservationTime(item.hora_inicio)} a ${displayReservationTime(item.hora_fin)}`;
   }
 
   function money(value) {
@@ -2914,6 +3236,97 @@ include 'partials/header.php';
     form.querySelectorAll('.money-input').forEach((input) => {
       input.value = moneyDigits(input.value) || '0';
     });
+  }
+
+  function syncProductUnitPricesFromPack(form) {
+    if (!form) return;
+
+    const packQuantity = Number(form.querySelector('[name="pack_cantidad"]')?.value || 0);
+    if (packQuantity <= 0) {
+      return;
+    }
+
+    const unitPurchaseInput = form.querySelector('[name="precio_compra"]');
+    const packPurchase = Number(moneyDigits(form.querySelector('[name="precio_compra_pack"]')?.value || '0') || 0);
+
+    if (unitPurchaseInput && packPurchase > 0) {
+      unitPurchaseInput.value = money(Math.ceil(packPurchase / packQuantity));
+      unitPurchaseInput.setCustomValidity('');
+    }
+  }
+
+  function updateProductPriceWarnings(form) {
+    if (!form) return;
+
+    const comparisons = [
+      { type: 'pack', purchase: 'precio_compra_pack', sale: 'precio_pack' },
+      { type: 'unit', purchase: 'precio_compra', sale: 'precio_venta' }
+    ];
+
+    comparisons.forEach(({ type, purchase, sale }) => {
+      const purchaseValue = Number(moneyDigits(form.querySelector(`[name="${purchase}"]`)?.value || '0') || 0);
+      const saleValue = Number(moneyDigits(form.querySelector(`[name="${sale}"]`)?.value || '0') || 0);
+      const warning = form.querySelector(`[data-price-warning="${type}"]`);
+      if (!warning) return;
+
+      const isBelowCost = purchaseValue > 0 && saleValue > 0 && saleValue < purchaseValue;
+      warning.hidden = !isBelowCost;
+      warning.textContent = isBelowCost
+        ? `Aviso: venta menor al costo por ${money(purchaseValue - saleValue)}.`
+        : '';
+    });
+  }
+
+  function validateProductRequiredFields(form) {
+    if (!form) return true;
+
+    let isValid = true;
+    const categoryInput = form.querySelector('[name="categoria"]');
+    const unitPurchaseInput = form.querySelector('[name="precio_compra"]');
+    const unitSaleInput = form.querySelector('[name="precio_venta"]');
+    const packQuantityInput = form.querySelector('[name="pack_cantidad"]');
+    const packPurchaseInput = form.querySelector('[name="precio_compra_pack"]');
+    const packSaleInput = form.querySelector('[name="precio_pack"]');
+
+    [categoryInput, unitPurchaseInput, unitSaleInput, packQuantityInput, packPurchaseInput, packSaleInput].forEach((input) => {
+      input?.setCustomValidity('');
+    });
+
+    if (categoryInput && categoryInput.value.trim() === '') {
+      categoryInput.setCustomValidity('La categoria del producto es obligatoria.');
+      isValid = false;
+    }
+
+    if (unitPurchaseInput && Number(moneyDigits(unitPurchaseInput.value) || 0) <= 0) {
+      unitPurchaseInput.setCustomValidity('Ingresa un precio de compra unidad mayor a cero.');
+      isValid = false;
+    }
+
+    if (unitSaleInput && Number(moneyDigits(unitSaleInput.value) || 0) <= 0) {
+      unitSaleInput.setCustomValidity('Ingresa un precio de venta unidad mayor a cero.');
+      isValid = false;
+    }
+
+    const packQuantity = Number(packQuantityInput?.value || 0);
+    const packPurchase = Number(moneyDigits(packPurchaseInput?.value || '0') || 0);
+    const packSale = Number(moneyDigits(packSaleInput?.value || '0') || 0);
+
+    if (packQuantity > 0 && packPurchase <= 0) {
+      packPurchaseInput?.setCustomValidity('Ingresa precio compra pack.');
+      isValid = false;
+    }
+
+    if (packQuantity > 0 && packSale <= 0) {
+      packSaleInput?.setCustomValidity('Ingresa precio de venta pack.');
+      isValid = false;
+    }
+
+    if (packQuantity <= 0 && (packPurchase > 0 || packSale > 0)) {
+      packQuantityInput?.setCustomValidity('Ingresa unidades por pack para usar precios por pack.');
+      isValid = false;
+    }
+
+    return isValid;
   }
 
   function escapeHtml(value) {
@@ -3046,6 +3459,19 @@ include 'partials/header.php';
     saleClientSearch.value = clientLabel(client);
     saleClientSuggestions.innerHTML = '';
     saleClientSuggestions.classList.remove('open');
+  }
+
+  function selectEditReservationClient(client) {
+    const clientIdInput = document.getElementById('editClienteId');
+    const searchInput = document.getElementById('editClientSearch');
+    const suggestions = document.getElementById('editClientSuggestions');
+    if (!clientIdInput || !searchInput || !suggestions) return;
+
+    clientIdInput.value = client.id;
+    searchInput.value = clientLabel(client);
+    searchInput.setCustomValidity('');
+    suggestions.innerHTML = '';
+    suggestions.classList.remove('open');
   }
 
   function providerLabel(provider) {
@@ -3189,7 +3615,7 @@ include 'partials/header.php';
     clientMessageModal.querySelector('button')?.focus();
   }
 
-  function openReceiptImageModal(url, pendingId = '', reservaId = '') {
+  function openReceiptImageModal(url, pendingId = '', reservaId = '', volver = 'reservas') {
     if (!receiptImageModal || !receiptImagePreview || !url) {
       return;
     }
@@ -3201,6 +3627,9 @@ include 'partials/header.php';
       confirmPendingReceiptForm.dataset.receiptConfirmed = hasPendingConfirmation ? '' : '1';
       confirmPendingReceiptId.value = pendingId;
       confirmPendingReceiptReservaId.value = reservaId;
+      if (confirmPendingReceiptVolver) {
+        confirmPendingReceiptVolver.value = volver;
+      }
       confirmPendingReceiptForm.hidden = !hasPendingConfirmation;
       confirmPendingReceiptButton.hidden = !hasPendingConfirmation;
       confirmPendingReceiptButton.disabled = false;
@@ -3209,6 +3638,17 @@ include 'partials/header.php';
     receiptImageModal.classList.add('open');
     receiptImageModal.setAttribute('aria-hidden', 'false');
   }
+
+  document.querySelectorAll('[data-view-pending-cash-receipt]').forEach((button) => {
+    button.addEventListener('click', () => {
+      openReceiptImageModal(
+        button.dataset.receiptUrl || '',
+        button.dataset.pendingId || '',
+        button.dataset.reservaId || '',
+        'caja'
+      );
+    });
+  });
 
   confirmPendingReceiptForm?.addEventListener('submit', (event) => {
     if (confirmPendingReceiptForm.dataset.receiptConfirmed === '1') {
@@ -3233,6 +3673,7 @@ include 'partials/header.php';
 
   function selectPurchaseProduct(product) {
     selectedPurchaseProduct = product;
+    if (addPurchaseItemButton) addPurchaseItemButton.disabled = false;
     purchaseProductId.value = product.id;
     purchaseProductSearch.value = purchaseProductLabel(product);
     purchaseProductSuggestions.innerHTML = '';
@@ -3294,6 +3735,7 @@ include 'partials/header.php';
         selectedReservationSaleProduct = null;
       } else {
         selectedSaleProduct = null;
+        if (addSaleItemButton) addSaleItemButton.disabled = true;
       }
       productIdInput.value = '';
       productSearchInput.value = '';
@@ -3309,6 +3751,7 @@ include 'partials/header.php';
       selectedReservationSaleProduct = product;
     } else {
       selectedSaleProduct = product;
+      if (addSaleItemButton) addSaleItemButton.disabled = Boolean(saleSubmitButton?.disabled);
     }
     productIdInput.value = product.id;
     if (typeInput) {
@@ -3355,6 +3798,7 @@ include 'partials/header.php';
     const rows = cart.map((item, index) => `
       <tr>
         <td>${escapeHtml(item.product.nombre)}</td>
+        <td>${escapeHtml(item.product.codigo_barra || '-')}</td>
         <td>${escapeHtml(item.type)}</td>
         <td>
           <input
@@ -3368,7 +3812,7 @@ include 'partials/header.php';
             aria-label="Cantidad de ${escapeHtml(item.product.nombre)}"
           >
         </td>
-        <td>${money(item.subtotal)}</td>
+        <td data-cart-subtotal="${index}">${money(item.subtotal)}</td>
         <td><button type="button" class="small danger" data-remove-cart-item="${index}" data-cart-list="${listId}">Quitar</button></td>
       </tr>
     `).join('');
@@ -3377,22 +3821,22 @@ include 'partials/header.php';
       list.innerHTML = `
         <div class="sale-cart-scroll">
           <table>
-            <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
+            <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
         <div class="sale-cart-total">
           <span><strong>Total productos</strong> <span class="cart-total-items">${cartItemsCount(cart)} item(s) cargado(s)</span></span>
-          <strong>${money(cartTotal(cart))}</strong>
+          <strong data-cart-total>${money(cartTotal(cart))}</strong>
         </div>
       `;
     } else {
       list.innerHTML = `
         <table>
-          <thead><tr><th>Producto</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
+          <thead><tr><th>Producto</th><th>C&oacute;digo</th><th>Tipo</th><th>Cant.</th><th>Subtotal</th><th></th></tr></thead>
           <tbody>
             ${rows}
-            <tr class="cart-total-row"><th colspan="3">Total productos <span class="cart-total-items">${cartItemsCount(cart)} item(s) cargado(s)</span></th><th colspan="2">${money(cartTotal(cart))}</th></tr>
+            <tr class="cart-total-row"><th colspan="4">Total productos <span class="cart-total-items">${cartItemsCount(cart)} item(s) cargado(s)</span></th><th colspan="2" data-cart-total>${money(cartTotal(cart))}</th></tr>
           </tbody>
         </table>
       `;
@@ -3436,8 +3880,10 @@ include 'partials/header.php';
                 <td>
                   <input type="number" class="cart-quantity" min="1" step="1" value="${Number(item.quantity)}" data-purchase-quantity="${index}" aria-label="Cantidad de ${escapeHtml(item.product.nombre)}">
                 </td>
-                <td>${money(item.price)}</td>
-                <td>${money(item.subtotal)}</td>
+                <td>
+                  <input type="text" class="money-input cart-purchase-price" inputmode="numeric" value="${money(item.price)}" data-purchase-price="${index}" aria-label="Precio de compra de ${escapeHtml(item.product.nombre)}">
+                </td>
+                <td data-purchase-subtotal="${index}">${money(item.subtotal)}</td>
                 <td><button type="button" class="small danger" data-remove-purchase-item="${index}">Quitar</button></td>
               </tr>
             `).join('')}
@@ -3446,16 +3892,16 @@ include 'partials/header.php';
       </div>
       <div class="purchase-cart-total">
         <span><strong>Total productos</strong> <span class="cart-total-items">${cartItemsCount(purchaseCart)} item(s) cargado(s)</span></span>
-        <strong>${money(cartTotal(purchaseCart))}</strong>
+        <strong data-purchase-cart-total>${money(cartTotal(purchaseCart))}</strong>
       </div>
     `;
 
-    purchaseCart.forEach((item) => {
+    purchaseCart.forEach((item, index) => {
       inputs.insertAdjacentHTML('beforeend', `
         <input type="hidden" name="producto_id[]" value="${Number(item.product.id)}">
         <input type="hidden" name="tipo_compra[]" value="${escapeHtml(item.type)}">
         <input type="hidden" name="cantidad[]" value="${Number(item.quantity)}">
-        <input type="hidden" name="precio_unitario[]" value="${Number(item.price)}">
+        <input type="hidden" name="precio_unitario[]" value="${Number(item.price)}" data-purchase-hidden-price="${Number(item.product.id)}-${index}">
         <input type="hidden" name="stock_ya_cargado[]" value="${item.stockAlreadyLoaded ? '1' : '0'}">
       `);
     });
@@ -3471,6 +3917,23 @@ include 'partials/header.php';
     item.subtotal = item.price * nextQuantity;
     renderPurchaseCart();
     updatePurchaseTotal();
+  }
+
+  function updatePurchaseCartPrice(index, input) {
+    const item = purchaseCart[index];
+    if (!item || !input) return;
+
+    formatMoneyInput(input);
+    const nextPrice = Number(moneyDigits(input.value) || 0);
+    item.price = nextPrice;
+    item.subtotal = nextPrice * Number(item.quantity || 0);
+
+    const subtotal = document.querySelector(`[data-purchase-subtotal="${index}"]`);
+    const hiddenPrice = document.querySelector(`[data-purchase-hidden-price="${Number(item.product.id)}-${index}"]`);
+    const cartTotalElement = document.querySelector('[data-purchase-cart-total]');
+    if (subtotal) subtotal.textContent = money(item.subtotal);
+    if (hiddenPrice) hiddenPrice.value = String(nextPrice);
+    if (cartTotalElement) cartTotalElement.textContent = money(cartTotal(purchaseCart));
   }
 
   function maxSaleCartQuantity(product, cart, type) {
@@ -3578,6 +4041,36 @@ include 'partials/header.php';
     }
   }
 
+  function updateCartQuantityLive(input) {
+    const index = Number(input.dataset.cartQuantity);
+    const isReservation = input.dataset.cartList === 'reservationSaleCartList';
+    const cart = isReservation ? reservationSaleCart : saleCart;
+    const item = cart[index];
+    const typedQuantity = Number(input.value);
+    if (!item || !Number.isFinite(typedQuantity) || typedQuantity < 1) return;
+
+    const maxUnits = availableStock(item.product, cart) + Number(item.units || 0);
+    const unitsPerItem = item.type === 'pack' ? Number(item.product.pack_cantidad || 0) : 1;
+    const nextQuantity = Math.min(typedQuantity, Math.floor(maxUnits / Math.max(1, unitsPerItem)));
+    if (nextQuantity < 1) return;
+
+    if (nextQuantity !== typedQuantity) input.value = String(nextQuantity);
+    item.quantity = nextQuantity;
+    item.units = cartItemUnits(item, nextQuantity);
+    item.subtotal = cartItemUnitPrice(item) * nextQuantity;
+
+    const list = document.getElementById(input.dataset.cartList);
+    const inputsId = isReservation ? 'reservationSaleCartInputs' : 'saleCartInputs';
+    const hiddenQuantity = document.getElementById(inputsId)?.querySelectorAll('input[name="cantidad[]"]')[index];
+    if (hiddenQuantity) hiddenQuantity.value = String(nextQuantity);
+    const subtotal = list?.querySelector(`[data-cart-subtotal="${index}"]`);
+    const total = list?.querySelector('[data-cart-total]');
+    const count = list?.querySelector('.cart-total-items');
+    if (subtotal) subtotal.textContent = money(item.subtotal);
+    if (total) total.textContent = money(cartTotal(cart));
+    if (count) count.textContent = `${cartItemsCount(cart)} item(s) cargado(s)`;
+  }
+
   function refreshReservationProductOptions() {
     if (selectedReservationSaleProduct && reservaVentaProductoSearch) {
       reservaVentaProductoSearch.value = productLabel(selectedReservationSaleProduct, reservationSaleCart);
@@ -3586,6 +4079,9 @@ include 'partials/header.php';
 
   function addCartItem(cartName) {
     const isReservation = cartName === 'reservation';
+    const now = performance.now();
+    if (!isReservation && (addSaleItemButton?.disabled || now - lastSaleItemAddedAt < 700)) return;
+
     const cart = isReservation ? reservationSaleCart : saleCart;
     const typeInput = document.getElementById(isReservation ? 'reservaVentaTipo' : 'ventaTipo');
     const quantityInput = document.getElementById(isReservation ? 'reservaVentaCantidad' : 'ventaCantidad');
@@ -3654,6 +4150,8 @@ include 'partials/header.php';
       quantityInput.value = 1;
       updateReservationSaleTotal();
     } else {
+      lastSaleItemAddedAt = performance.now();
+      if (addSaleItemButton) addSaleItemButton.disabled = true;
       renderCart(saleCart, 'saleCartList', 'saleCartInputs');
       selectedSaleProduct = null;
       productInput.value = '';
@@ -3763,11 +4261,24 @@ include 'partials/header.php';
   }
 
   function timeLabel(hour) {
-    return String(hour).padStart(2, '0') + ':00';
+    const totalMinutes = Math.round(Number(hour || 0) * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  }
+
+  function displayTimeLabel(hour) {
+    const label = timeLabel(hour);
+    return label === '24:00' ? '00:00' : label;
+  }
+
+  function displayReservationTime(value) {
+    const label = String(value || '').slice(0, 5);
+    return label === '24:00' ? '00:00' : label;
   }
 
   function reservationHour(value) {
-    return Number(String(value).slice(0, 2));
+    return reservationTimeToHours(value) ?? Number(String(value).slice(0, 2));
   }
 
   function isPastSlot(date, hour) {
@@ -3776,7 +4287,7 @@ include 'partials/header.php';
     }
 
     const now = new Date();
-    return hour <= now.getHours();
+    return hour < (now.getHours() + (now.getMinutes() / 60));
   }
 
   function reservationTimeToHours(value) {
@@ -3787,6 +4298,82 @@ include 'partials/header.php';
     return hours + (minutes / 60);
   }
 
+  function durationLabel(duration) {
+    const totalMinutes = Math.round(Number(duration || 0) * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+  }
+
+  function normalizeSlotHour(value) {
+    if (value === null) {
+      return null;
+    }
+    return Math.round(Number(value) / slotStep) * slotStep;
+  }
+
+  function fillTimeSelect(select, startHour, endHour, selectedHour, isAllowed = null) {
+    if (!select) {
+      return;
+    }
+
+    select.innerHTML = '';
+    for (let hour = startHour; hour <= endHour; hour += slotStep) {
+      if (isAllowed && !isAllowed(hour)) {
+        continue;
+      }
+      const option = document.createElement('option');
+      option.value = timeLabel(hour);
+      option.textContent = displayTimeLabel(hour);
+      select.appendChild(option);
+    }
+    if (select.options.length === 0) {
+      return;
+    }
+
+    const preferredValue = timeLabel(Math.min(endHour, Math.max(startHour, selectedHour)));
+    select.value = Array.from(select.options).some((option) => option.value === preferredValue)
+      ? preferredValue
+      : select.options[0].value;
+  }
+
+  function populateReservationTimeSelects(startHour = hourStart, endHour = startHour + minReservationDuration) {
+    const startSelect = document.getElementById('modalHoraInicioVisible');
+    const endSelect = document.getElementById('modalHoraFinVisible');
+    if (!startSelect || !endSelect) {
+      return;
+    }
+
+    const selectedStart = Math.min(hourEnd - minReservationDuration, Math.max(hourStart, startHour));
+    const selectedEnd = Math.min(hourEnd, Math.max(selectedStart + minReservationDuration, endHour));
+    fillTimeSelect(
+      startSelect,
+      hourStart,
+      hourEnd - minReservationDuration,
+      selectedStart,
+      (hour) => !isPastSlot(reservationModalState?.date || todayKey, hour)
+        && !hasConflict(reservationModalState?.date || todayKey, hour, hour + minReservationDuration)
+    );
+    const currentStart = reservationTimeToHours(startSelect.value) ?? selectedStart;
+    fillTimeSelect(
+      endSelect,
+      currentStart + minReservationDuration,
+      hourEnd,
+      selectedEnd,
+      (hour) => !hasConflict(reservationModalState?.date || todayKey, currentStart, hour)
+    );
+    if (startSelect.options.length === 0 || endSelect.options.length === 0) {
+      showClientMessage('No hay horarios disponibles para completar al menos 1 hora.');
+    }
+  }
+
+  function normalizeSlotTime(value, min, max) {
+    const match = String(value || '').match(/(\d{1,2})(?::([0-5]\d))?/);
+    let time = match ? Number(match[1]) + (Number(match[2] || 0) / 60) : min;
+    time = Math.round(time / slotStep) * slotStep;
+    return Math.min(max, Math.max(min, time));
+  }
+
   function syncEditHourInput(sourceId, targetId) {
     const source = document.getElementById(sourceId);
     const target = document.getElementById(targetId);
@@ -3794,28 +4381,23 @@ include 'partials/header.php';
       return;
     }
 
-    const min = Number(source.dataset.minHour || 0);
-    const max = Number(source.dataset.maxHour || 24);
-    const match = String(source.value || '').match(/\d{1,2}/);
-    const rawHour = match ? Number(match[0]) : min;
-    const hour = Math.min(max, Math.max(min, Math.floor(rawHour)));
-    source.value = `${String(hour).padStart(2, '0')}:00`;
-    target.value = `${String(hour).padStart(2, '0')}:00`;
+    const hour = normalizeSlotHour(reservationTimeToHours(source.value));
+    target.value = timeLabel(hour ?? 0);
   }
 
   function syncEditHours() {
     syncEditHourInput('editHoraInicioHour', 'editHoraInicio');
-    const start = reservationTimeToHours(document.getElementById('editHoraInicio')?.value) || 7;
-    const endInput = document.getElementById('editHoraFinHour');
-    if (endInput) {
-      endInput.dataset.minHour = String(Math.min(24, start + 1));
-    }
     syncEditHourInput('editHoraFinHour', 'editHoraFin');
   }
 
   function updateEditReservationPrice() {
-    syncEditHours();
     const courtId = Number(document.getElementById('editCanchaId')?.value || 0);
+    const startSelect = document.getElementById('editHoraInicioHour');
+    const endSelect = document.getElementById('editHoraFinHour');
+    const startBefore = reservationTimeToHours(startSelect?.value) ?? hourStart;
+    const endBefore = reservationTimeToHours(endSelect?.value) ?? (startBefore + minReservationDuration);
+    populateEditReservationTimeSelects(startBefore, endBefore);
+    syncEditHours();
     const start = reservationTimeToHours(document.getElementById('editHoraInicio')?.value);
     const end = reservationTimeToHours(document.getElementById('editHoraFin')?.value);
     const court = courts.find((item) => Number(item.id) === courtId);
@@ -3823,6 +4405,29 @@ include 'partials/header.php';
       return;
     }
     document.getElementById('editPrecioTotal').value = money(Number(court.precio_hora || 0) * (end - start));
+  }
+
+  function validateEditReservationSchedule(showMessage = false) {
+    const date = document.getElementById('editFecha')?.value || '';
+    const courtId = Number(document.getElementById('editCanchaId')?.value || 0);
+    const reservaId = Number(document.getElementById('editReservaId')?.value || 0);
+    const startSelect = document.getElementById('editHoraInicioHour');
+    const endSelect = document.getElementById('editHoraFinHour');
+    const startHour = reservationTimeToHours(startSelect?.value);
+    const endHour = reservationTimeToHours(endSelect?.value);
+    const message = 'Ya existe otra reserva para esa cancha en la fecha y hora seleccionadas.';
+    const hasInvalidRange = startHour === null || endHour === null || endHour <= startHour;
+    const hasScheduleConflict = !hasInvalidRange
+      && hasReservationConflict(date, courtId, startHour, endHour, reservaId);
+
+    startSelect?.setCustomValidity(hasScheduleConflict ? message : '');
+    endSelect?.setCustomValidity(hasInvalidRange ? 'La hora fin debe ser posterior a la hora inicio.' : (hasScheduleConflict ? message : ''));
+
+    if (showMessage && (hasInvalidRange || hasScheduleConflict)) {
+      showClientMessage(hasInvalidRange ? 'La hora fin debe ser posterior a la hora inicio.' : message);
+    }
+
+    return !hasInvalidRange && !hasScheduleConflict;
   }
 
   function renderCourtTabs() {
@@ -3848,13 +4453,19 @@ include 'partials/header.php';
     const daysToShow = calendarDaysToShow();
     const weekDays = Array.from({ length: daysToShow }, (_, index) => addDays(weekStart, index));
     const end = addDays(weekStart, daysToShow - 1);
-    calendarTitle.textContent = daysToShow === 7
+    const calendarDateLabel = daysToShow === 7
       ? `${weekDays[0].toLocaleDateString('es-PY', { day: '2-digit', month: 'short' })} - ${end.toLocaleDateString('es-PY', { day: '2-digit', month: 'short', year: 'numeric' })}`
       : `${weekDays[0].toLocaleDateString('es-PY', { weekday: 'short', day: '2-digit', month: 'short' })} - ${end.toLocaleDateString('es-PY', { weekday: 'short', day: '2-digit', month: 'short' })}`;
+    calendarTitle.textContent = calendarDateLabel;
+    const calendarDateInTabs = document.getElementById('calendarDateInTabs');
+    if (calendarDateInTabs) {
+      calendarDateInTabs.textContent = calendarDateLabel;
+    }
     document.getElementById('prevWeek').disabled = weekStart <= today;
     weekCalendar.innerHTML = '';
     weekCalendarHeader.innerHTML = '';
-    weekCalendar.style.setProperty('--calendar-rows', String(hourEnd - hourStart));
+    const calendarRows = Math.round((hourEnd - hourStart) / slotStep);
+    weekCalendar.style.setProperty('--calendar-rows', String(calendarRows));
     weekCalendar.style.setProperty('--calendar-days', String(daysToShow));
     weekCalendarHeader.style.setProperty('--calendar-days', String(daysToShow));
 
@@ -3869,30 +4480,42 @@ include 'partials/header.php';
       weekCalendarHeader.appendChild(header);
     });
 
-    for (let hour = hourStart; hour < hourEnd; hour++) {
-      const row = hour - hourStart + 1;
-      const label = document.createElement('div');
-      label.className = 'calendar-hour';
-      label.textContent = timeLabel(hour);
-      label.style.gridColumn = '1';
-      label.style.gridRow = String(row);
-      weekCalendar.appendChild(label);
+    for (let slotIndex = 0; slotIndex < calendarRows; slotIndex++) {
+      const hour = hourStart + (slotIndex * slotStep);
+      const row = slotIndex + 1;
+      if (Number.isInteger(hour)) {
+        const label = document.createElement('div');
+        label.className = 'calendar-hour';
+        label.textContent = timeLabel(hour);
+        label.style.gridColumn = '1';
+        label.style.gridRow = `${row} / span ${Math.round(1 / slotStep)}`;
+        weekCalendar.appendChild(label);
+      }
+
+      if (hour > hourEnd - minReservationDuration) {
+        continue;
+      }
 
       weekDays.forEach((date, index) => {
         const slot = document.createElement('button');
         slot.type = 'button';
         slot.className = 'calendar-slot';
         slot.dataset.date = toDateKey(date);
-        slot.dataset.hour = hour;
-        if (isPastSlot(slot.dataset.date, hour)) {
+        slot.dataset.hour = String(hour);
+        slot.dataset.watermark = `${dayNames[date.getDay()]} ${date.getDate()}/${date.getMonth() + 1} · ${displayTimeLabel(hour)}-${displayTimeLabel(hour + minReservationDuration)}`;
+        const slotBlocked = hasConflict(slot.dataset.date, hour, hour + minReservationDuration);
+        if (hour > hourEnd - minReservationDuration || isPastSlot(slot.dataset.date, hour) || slotBlocked) {
           slot.classList.add('slot-disabled');
+          slot.classList.toggle('slot-occupied', slotBlocked);
           slot.disabled = true;
         }
         if (isSlotInSelection(slot.dataset.date, hour)) {
           slot.classList.add('slot-selected');
         }
         slot.style.gridColumn = String(index + 2);
-        slot.style.gridRow = String(row);
+        slot.style.gridRow = hour === hourEnd - minReservationDuration
+          ? `${row} / span ${Math.round(minReservationDuration / slotStep)}`
+          : String(row);
         slot.addEventListener('pointerdown', (event) => startSlotSelection(event, slot.dataset.date, Number(slot.dataset.hour)));
         slot.addEventListener('pointerenter', () => updateSlotSelection(slot.dataset.date, Number(slot.dataset.hour)));
         weekCalendar.appendChild(slot);
@@ -3906,14 +4529,21 @@ include 'partials/header.php';
         const dayIndex = weekDays.findIndex((date) => toDateKey(date) === item.fecha);
         const start = reservationHour(item.hora_inicio);
         const endHour = reservationHour(item.hora_fin);
-        const duration = Math.max(1, endHour - start);
+        if (endHour <= hourStart || start >= hourEnd) {
+          return;
+        }
+        const visibleStart = Math.max(start, hourStart);
+        const visibleEnd = Math.min(endHour, hourEnd);
+        const duration = Math.max(slotStep, visibleEnd - visibleStart);
+        const rowStart = Math.round((visibleStart - hourStart) / slotStep) + 1;
+        const rowSpan = Math.max(1, Math.round(duration / slotStep));
         const block = document.createElement('button');
         block.type = 'button';
         block.className = `reservation-block ${item.estado}`;
         block.classList.toggle('has-pending-receipt', hasPendingReceipt(item));
         block.style.gridColumn = String(dayIndex + 2);
-        block.style.gridRow = `${start - hourStart + 1} / span ${duration}`;
-        block.innerHTML = `<strong><span class="reservation-id">#${item.id}</span> ${String(item.hora_inicio).slice(0, 5)} - ${String(item.hora_fin).slice(0, 5)}</strong><span>${escapeHtml(item.cliente)}</span><small>Saldo ${money(item.saldo)}</small>`;
+        block.style.gridRow = `${rowStart} / span ${rowSpan}`;
+        block.innerHTML = `<strong><span class="reservation-id">#${item.id}</span> ${displayReservationTime(item.hora_inicio)} - ${displayReservationTime(item.hora_fin)}</strong><span>${escapeHtml(item.cliente)}</span><small>Saldo ${money(item.saldo)}</small>`;
         block.addEventListener('pointerdown', (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -3969,13 +4599,22 @@ include 'partials/header.php';
   }
 
   function isSlotInSelection(date, hour) {
-    if (!dragSelection || dragSelection.date !== date) {
+    const range = getDragSelectionRange(date, dragSelection?.endHour);
+    if (!range) {
       return false;
     }
 
-    const startHour = Math.min(dragSelection.startHour, dragSelection.endHour);
-    const endHour = Math.max(dragSelection.startHour, dragSelection.endHour);
-    return hour >= startHour && hour <= endHour;
+    return hour >= range.startHour && hour < range.endHour;
+  }
+
+  function getDragSelectionRange(date, endSlotHour) {
+    if (!dragSelection || dragSelection.date !== date) {
+      return null;
+    }
+
+    const startHour = Math.min(dragSelection.startHour, endSlotHour);
+    const endHour = Math.max(dragSelection.startHour + minReservationDuration, endSlotHour + slotStep);
+    return { startHour, endHour };
   }
 
   function paintSlotSelection() {
@@ -3996,6 +4635,55 @@ include 'partials/header.php';
     });
   }
 
+  function hasReservationConflict(date, courtId, startHour, endHour, ignoreReservationId = 0) {
+    return reservations.some((item) => {
+      if (
+        Number(item.id) === Number(ignoreReservationId)
+        || Number(item.cancha_id) !== Number(courtId)
+        || item.fecha !== date
+        || item.estado === 'cancelado'
+      ) {
+        return false;
+      }
+
+      const start = reservationHour(item.hora_inicio);
+      const end = reservationHour(item.hora_fin);
+      return start < endHour && end > startHour;
+    });
+  }
+
+  function populateEditReservationTimeSelects(startHour, endHour) {
+    const startSelect = document.getElementById('editHoraInicioHour');
+    const endSelect = document.getElementById('editHoraFinHour');
+    const date = document.getElementById('editFecha')?.value || '';
+    const courtId = Number(document.getElementById('editCanchaId')?.value || 0);
+    const reservaId = Number(document.getElementById('editReservaId')?.value || 0);
+    if (!startSelect || !endSelect || !date || !courtId) {
+      return;
+    }
+
+    const selectedStart = Math.min(hourEnd - minReservationDuration, Math.max(hourStart, startHour));
+    const selectedEnd = Math.min(hourEnd, Math.max(selectedStart + minReservationDuration, endHour));
+    fillTimeSelect(
+      startSelect,
+      hourStart,
+      hourEnd - minReservationDuration,
+      selectedStart,
+      (hour) => !hasReservationConflict(date, courtId, hour, hour + minReservationDuration, reservaId)
+    );
+
+    const currentStart = reservationTimeToHours(startSelect.value) ?? selectedStart;
+    fillTimeSelect(
+      endSelect,
+      currentStart + minReservationDuration,
+      hourEnd,
+      selectedEnd,
+      (hour) => !hasReservationConflict(date, courtId, currentStart, hour, reservaId)
+    );
+    document.getElementById('editHoraInicio').value = startSelect.value || timeLabel(selectedStart);
+    document.getElementById('editHoraFin').value = endSelect.value || timeLabel(selectedEnd);
+  }
+
   function reservationModalDateLabel(date) {
     const [year, month, day] = String(date).split('-').map(Number);
     const selectedDate = new Date(year, month - 1, day);
@@ -4006,27 +4694,61 @@ include 'partials/header.php';
   function syncReservationDuration(nextDuration) {
     if (!reservationModalState) return;
 
-    const duration = Math.max(1, Math.floor(Number(nextDuration || 1)));
+    const duration = Math.max(minReservationDuration, Math.round(Number(nextDuration || 1) / slotStep) * slotStep);
     const endHour = reservationModalState.startHour + duration;
     if (endHour > hourEnd) {
       showClientMessage('La reserva no puede pasar de las 24:00.');
-      document.getElementById('modalReservationDuration').value = reservationModalState.duration;
+      document.getElementById('modalReservationDuration').textContent = durationLabel(reservationModalState.duration);
       return;
     }
 
     if (hasConflict(reservationModalState.date, reservationModalState.startHour, endHour)) {
       showClientMessage('El rango seleccionado se cruza con una reserva existente.');
-      document.getElementById('modalReservationDuration').value = reservationModalState.duration;
+      document.getElementById('modalReservationDuration').textContent = durationLabel(reservationModalState.duration);
       return;
     }
 
     const court = courts.find((item) => Number(item.id) === Number(reservationModalState.courtId));
     reservationModalState.duration = duration;
-    document.getElementById('modalReservationDuration').value = duration;
+    document.getElementById('modalReservationDuration').textContent = durationLabel(duration);
     document.getElementById('modalHoraFin').value = timeLabel(endHour);
+    populateReservationTimeSelects(reservationModalState.startHour, endHour);
     document.getElementById('modalPrecioTotal').value = money(court ? Number(court.precio_hora || 0) * duration : 0);
     document.getElementById('modalReservationNumber').textContent = `#${nextReservationId}`;
-    document.getElementById('modalSummaryText').textContent = `${court ? court.nombre : 'Cancha'} | ${reservationModalDateLabel(reservationModalState.date)} | ${timeLabel(reservationModalState.startHour)} a ${timeLabel(endHour)} |`;
+    document.getElementById('modalSummaryText').textContent = `${court ? court.nombre : 'Cancha'} | ${reservationModalDateLabel(reservationModalState.date)} |`;
+  }
+
+  function syncReservationTimesFromInputs() {
+    if (!reservationModalState) return;
+    const startInput = document.getElementById('modalHoraInicioVisible');
+    const endInput = document.getElementById('modalHoraFinVisible');
+    const previousStart = reservationModalState.startHour;
+    const previousDuration = reservationModalState.duration;
+    let startHour = normalizeSlotHour(reservationTimeToHours(startInput?.value));
+    let endHour = normalizeSlotHour(reservationTimeToHours(endInput?.value));
+
+    if (startHour === null) startHour = previousStart;
+    if (endHour === null) endHour = previousStart + previousDuration;
+
+    startHour = Math.min(hourEnd - minReservationDuration, Math.max(hourStart, startHour));
+    endHour = Math.min(hourEnd, Math.max(startHour + minReservationDuration, endHour));
+
+    if (isPastSlot(reservationModalState.date, startHour)) {
+      showClientMessage('No se pueden crear reservas en horarios anteriores a la hora actual.');
+      populateReservationTimeSelects(previousStart, previousStart + previousDuration);
+      return;
+    }
+
+    if (hasConflict(reservationModalState.date, startHour, endHour)) {
+      showClientMessage('El rango seleccionado se cruza con una reserva existente.');
+      populateReservationTimeSelects(previousStart, previousStart + previousDuration);
+      return;
+    }
+
+    reservationModalState.startHour = startHour;
+    reservationModalState.duration = endHour - startHour;
+    document.getElementById('modalHoraInicio').value = timeLabel(startHour);
+    syncReservationDuration(reservationModalState.duration);
   }
 
   function startSlotSelection(event, date, hour) {
@@ -4036,8 +4758,16 @@ include 'partials/header.php';
       return;
     }
     event.preventDefault();
+    if (hour > hourEnd - minReservationDuration) {
+      showClientMessage('La duracion minima de alquiler es 1 hora.');
+      return;
+    }
     if (isPastSlot(date, hour)) {
       showClientMessage('No se pueden crear reservas en horarios anteriores a la hora actual.');
+      return;
+    }
+    if (hasConflict(date, hour, hour + minReservationDuration)) {
+      showClientMessage('El rango seleccionado se cruza con una reserva existente.');
       return;
     }
     dragSelection = { date, startHour: hour, endHour: hour };
@@ -4046,6 +4776,11 @@ include 'partials/header.php';
 
   function updateSlotSelection(date, hour) {
     if (!dragSelection || dragSelection.date !== date) {
+      return;
+    }
+
+    const range = getDragSelectionRange(date, hour);
+    if (!range || hasConflict(date, range.startHour, range.endHour) || isPastSlot(date, range.startHour)) {
       return;
     }
 
@@ -4060,7 +4795,7 @@ include 'partials/header.php';
 
     const date = dragSelection.date;
     const startHour = Math.min(dragSelection.startHour, dragSelection.endHour);
-    const endHour = Math.max(dragSelection.startHour, dragSelection.endHour) + 1;
+    const endHour = Math.max(dragSelection.startHour + minReservationDuration, dragSelection.endHour + slotStep);
     dragSelection = null;
 
     if (isPastSlot(date, startHour)) {
@@ -4095,7 +4830,8 @@ include 'partials/header.php';
     document.getElementById('modalFecha').value = date;
     document.getElementById('modalHoraInicio').value = timeLabel(startHour);
     document.getElementById('modalHoraFin').value = timeLabel(endHour);
-    const duration = Math.max(1, endHour - startHour);
+    populateReservationTimeSelects(startHour, endHour);
+    const duration = Math.max(minReservationDuration, endHour - startHour);
     reservationModalState = { courtId: selectedCourtId, date, startHour, duration };
     syncReservationDuration(duration);
     modalClienteId.value = '';
@@ -4110,6 +4846,27 @@ include 'partials/header.php';
     reservationModal.setAttribute('aria-hidden', 'false');
   }
 
+  const reservationSectionTabs = document.querySelectorAll('[data-reservation-section]');
+
+  function setReservationDetailSection(sectionId = '') {
+    reservationSectionTabs.forEach((tab) => {
+      const isActive = tab.dataset.reservationSection === sectionId;
+      tab.classList.toggle('active', isActive);
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    });
+
+    ['reservationEditSection', 'reservationPaymentSection', 'reservationConsumptionSection'].forEach((id) => {
+      document.getElementById(id).open = id === sectionId;
+    });
+  }
+
+  reservationSectionTabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const sectionId = tab.dataset.reservationSection;
+      setReservationDetailSection(tab.classList.contains('active') ? '' : sectionId);
+    });
+  });
+
   function openDetailModal(item) {
     reservationSaleCart = [];
     renderCart(reservationSaleCart, 'reservationSaleCartList', 'reservationSaleCartInputs');
@@ -4122,9 +4879,7 @@ include 'partials/header.php';
     document.getElementById('reservaVentaCantidad').value = 1;
     refreshReservationProductOptions();
     document.getElementById('reservationDetailTitle').textContent = `Detalle de reserva #${item.id}`;
-    document.getElementById('reservationEditSection').open = false;
-    document.getElementById('reservationPaymentSection').open = false;
-    document.getElementById('reservationConsumptionSection').open = false;
+    setReservationDetailSection('');
     document.getElementById('detailReservaIdPago').value = item.id;
     document.getElementById('detailReservaIdVenta').value = item.id;
     const paymentForm = document.getElementById('reservationPaymentForm');
@@ -4212,19 +4967,20 @@ include 'partials/header.php';
       );
     });
     document.getElementById('editReservaId').value = item.id;
-    document.getElementById('editClienteId').value = item.cliente_id;
+    selectEditReservationClient({
+      id: item.cliente_id,
+      nombre: item.cliente,
+      telefono: item.telefono
+    });
     document.getElementById('editCanchaId').value = item.cancha_id;
     document.getElementById('editFecha').value = item.fecha;
     const editHoraInicioHour = document.getElementById('editHoraInicioHour');
     const editHoraFinHour = document.getElementById('editHoraFinHour');
-    const startHour = Number(String(item.hora_inicio).slice(0, 2));
-    const endHour = Number(String(item.hora_fin).slice(0, 2));
-    editHoraInicioHour.dataset.minHour = String(Math.max(7, startHour));
-    editHoraInicioHour.dataset.maxHour = '23';
-    editHoraFinHour.dataset.minHour = String(Math.min(24, Math.max(startHour + 1, 8)));
-    editHoraFinHour.dataset.maxHour = '24';
-    editHoraInicioHour.value = `${String(startHour).padStart(2, '0')}:00`;
-    editHoraFinHour.value = `${String(endHour).padStart(2, '0')}:00`;
+    const startHour = reservationHour(item.hora_inicio);
+    const endHour = reservationHour(item.hora_fin);
+    populateEditReservationTimeSelects(startHour, endHour);
+    editHoraInicioHour.value = timeLabel(startHour);
+    editHoraFinHour.value = timeLabel(endHour);
     syncEditHours();
     document.getElementById('editPrecioTotal').value = money(item.precio_total);
     const reservationEditForm = document.getElementById('reservationEditForm');
@@ -4237,20 +4993,12 @@ include 'partials/header.php';
       editEstadoCancelado.textContent = Number(item.pagado || 0) > 0 ? 'Cancelado (bloqueado por pago)' : 'Cancelado';
     }
     editEstado.value = item.estado === 'cancelado' && Number(item.pagado || 0) > 0 ? 'confirmado' : item.estado;
-    document.getElementById('editObservacion').value = item.observacion || '';
     document.getElementById('reservationDetail').innerHTML = `
       <dl>
         <div><dt>Cliente</dt><dd>${escapeHtml(item.cliente)} - ${escapeHtml(item.telefono)}</dd></div>
         <div><dt>Cancha</dt><dd>${escapeHtml(item.cancha)}</dd></div>
         <div><dt>Fecha</dt><dd>${escapeHtml(reservationDateLabel(item))}</dd></div>
-        <div><dt>Estado</dt><dd>${escapeHtml(item.estado)}</dd></div>
-        <div><dt>Alquiler</dt><dd>${money(item.precio_total)}</dd></div>
-        <div><dt>Consumos</dt><dd>${money(item.consumo_total)}</dd></div>
-        <div><dt>Total alcanzado</dt><dd>${money(item.total_alcanzado)}</dd></div>
-        <div><dt>Pagado</dt><dd>${money(item.pagado)}</dd></div>
-        <div><dt>Pagado efectivo</dt><dd>${money(item.pagado_efectivo)}</dd></div>
-        <div><dt>Pagado transferencia</dt><dd>${money(item.pagado_transferencia)}</dd></div>
-        <div class="${Number(item.saldo || 0) > 0 ? 'pending-balance' : ''}"><dt>Saldo total</dt><dd>${money(item.saldo)}</dd></div>
+        <div class="pending-balance"><dt>Saldo</dt><dd>${money(item.saldo)}</dd></div>
       </dl>
     `;
     updateReservationSaleTotal();
@@ -4264,8 +5012,14 @@ include 'partials/header.php';
       return;
     }
 
+    document.getElementById('productModalTitle').textContent = 'Editar producto';
+    const productForm = document.getElementById('productForm');
+    productForm.action = 'editar_producto.php';
+    productForm.dataset.editProductId = String(product.id || '');
+    document.getElementById('productSubmitButton').textContent = 'Guardar cambios';
     document.getElementById('editProductoId').value = product.id;
     document.getElementById('editProductoNombre').value = product.nombre || '';
+    document.getElementById('editProductoNombre').setCustomValidity('');
     document.getElementById('editProductoCodigo').value = product.codigo_barra || '';
     editProductoProveedorId.value = product.proveedor_id || '';
     editProductoProveedorSearch.value = product.proveedor || '';
@@ -4280,12 +5034,87 @@ include 'partials/header.php';
     document.getElementById('editProductoCompra').value = money(product.precio_compra);
     document.getElementById('editProductoVenta').value = money(product.precio_venta);
     document.getElementById('editProductoPackCantidad').value = Number(product.pack_cantidad || 0);
+    document.getElementById('editProductoCompraPack').value = money(product.precio_compra_pack);
     document.getElementById('editProductoPackPrecio').value = money(product.precio_pack);
     document.getElementById('editProductoStock').value = Number(product.stock || 0);
     document.getElementById('editProductoEstado').value = product.estado || 'activo';
+    updateProductDuplicateWarning('editProductoNombre', 'editProductDuplicateName', productForm.dataset.editProductId);
+    updateProductPriceWarnings(productForm);
     productModal.classList.add('open');
     productModal.setAttribute('aria-hidden', 'false');
     document.getElementById('editProductoNombre').focus();
+  }
+
+  function openCreateProductModal() {
+    if (!productModal) {
+      return;
+    }
+
+    document.getElementById('productModalTitle').textContent = 'Nuevo producto';
+    const productForm = document.getElementById('productForm');
+    productForm.action = 'guardar_producto.php';
+    productForm.dataset.editProductId = '';
+    document.getElementById('productSubmitButton').textContent = 'Guardar producto';
+    document.getElementById('editProductoId').value = '';
+    document.getElementById('editProductoNombre').value = '';
+    document.getElementById('editProductoNombre').setCustomValidity('');
+    document.getElementById('editProductoCodigo').value = '';
+    editProductoProveedorId.value = '';
+    editProductoProveedorSearch.value = '';
+    editProductoProveedorSuggestions.innerHTML = '';
+    editProductoProveedorSuggestions.classList.remove('open');
+    document.getElementById('editProductoCategoria').value = '';
+    const editCategorySuggestions = categorySuggestions('editProductoCategoria');
+    if (editCategorySuggestions) {
+      editCategorySuggestions.innerHTML = '';
+      editCategorySuggestions.classList.remove('open');
+    }
+    document.getElementById('editProductoCompra').value = '0';
+    document.getElementById('editProductoVenta').value = '0';
+    document.getElementById('editProductoPackCantidad').value = '0';
+    document.getElementById('editProductoCompraPack').value = '0';
+    document.getElementById('editProductoPackPrecio').value = '0';
+    document.getElementById('editProductoStock').value = '0';
+    document.getElementById('editProductoEstado').value = 'activo';
+    setProductDuplicateWarning('editProductDuplicateName', '');
+    updateProductPriceWarnings(productForm);
+    productModal.classList.add('open');
+    productModal.setAttribute('aria-hidden', 'false');
+    document.getElementById('editProductoNombre').focus();
+  }
+
+  function openToggleProductModal(button) {
+    const modal = document.getElementById('toggleProductModal');
+    if (!modal) {
+      return;
+    }
+
+    const currentStatus = button.dataset.estado || 'activo';
+    const nextStatus = currentStatus === 'activo' ? 'inactivo' : 'activo';
+    const actionLabel = nextStatus === 'inactivo' ? 'Desactivar' : 'Activar';
+
+    document.getElementById('toggleProductId').value = button.dataset.id || '';
+    document.getElementById('toggleProductStatus').value = nextStatus;
+    document.getElementById('toggleProductTitle').textContent = `${actionLabel} producto`;
+    document.getElementById('toggleProductText').textContent = `${actionLabel} el producto "${button.dataset.nombre || ''}"?`;
+    const submitButton = document.getElementById('toggleProductSubmit');
+    submitButton.textContent = actionLabel;
+    submitButton.classList.toggle('danger', nextStatus === 'inactivo');
+
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+
+  function openDeleteProductModal(button) {
+    const modal = document.getElementById('deleteProductModal');
+    if (!modal) {
+      return;
+    }
+
+    document.getElementById('deleteProductId').value = button.dataset.id || '';
+    document.getElementById('deleteProductText').textContent = `Eliminar el producto "${button.dataset.nombre || ''}"? Solo se podra eliminar si no esta usado en compras, ventas o consumos.`;
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
   }
 
   function openCourtModal(id) {
@@ -4294,6 +5123,9 @@ include 'partials/header.php';
       return;
     }
 
+    document.getElementById('courtModalTitle').textContent = 'Editar cancha';
+    document.getElementById('courtForm').action = 'editar_cancha.php';
+    document.getElementById('courtSubmitButton').textContent = 'Guardar cambios';
     document.getElementById('editCanchaModalId').value = court.id;
     document.getElementById('editCanchaNombre').value = court.nombre || '';
     document.getElementById('editCanchaTipo').value = court.tipo || '';
@@ -4302,6 +5134,36 @@ include 'partials/header.php';
     courtModal.classList.add('open');
     courtModal.setAttribute('aria-hidden', 'false');
     document.getElementById('editCanchaNombre').focus();
+  }
+
+  function openCreateCourtModal() {
+    if (!courtModal) {
+      return;
+    }
+
+    document.getElementById('courtModalTitle').textContent = 'Nueva cancha';
+    document.getElementById('courtForm').action = 'guardar_cancha.php';
+    document.getElementById('courtSubmitButton').textContent = 'Guardar cancha';
+    document.getElementById('editCanchaModalId').value = '';
+    document.getElementById('editCanchaNombre').value = '';
+    document.getElementById('editCanchaTipo').value = '';
+    document.getElementById('editCanchaPrecio').value = '';
+    document.getElementById('editCanchaEstado').value = 'activa';
+    courtModal.classList.add('open');
+    courtModal.setAttribute('aria-hidden', 'false');
+    document.getElementById('editCanchaNombre').focus();
+  }
+
+  function openDeleteCourtModal(button) {
+    const modal = document.getElementById('deleteCourtModal');
+    if (!modal) {
+      return;
+    }
+
+    document.getElementById('deleteCanchaId').value = button.dataset.id || '';
+    document.getElementById('deleteCanchaText').textContent = `Eliminar la cancha "${button.dataset.nombre || ''}"? Solo se podra eliminar si no tiene reservas registradas.`;
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
   }
 
   function openProviderModal(id) {
@@ -4317,10 +5179,30 @@ include 'partials/header.php';
     document.getElementById('editProveedorRuc').value = provider.ruc || '';
     document.getElementById('editProveedorDireccion').value = provider.direccion || '';
     document.getElementById('editProveedorEstado').value = provider.estado || 'activo';
-    document.getElementById('editProveedorNotas').value = provider.notas || '';
     providerModal.classList.add('open');
     providerModal.setAttribute('aria-hidden', 'false');
     document.getElementById('editProveedorNombre').focus();
+  }
+
+  function openToggleProviderModal(button) {
+    if (!toggleProviderModal) {
+      return;
+    }
+
+    const currentStatus = button.dataset.estado || 'activo';
+    const nextStatus = currentStatus === 'activo' ? 'inactivo' : 'activo';
+    const actionLabel = nextStatus === 'inactivo' ? 'Desactivar' : 'Activar';
+
+    document.getElementById('toggleProviderId').value = button.dataset.id || '';
+    document.getElementById('toggleProviderStatus').value = nextStatus;
+    document.getElementById('toggleProviderTitle').textContent = `${actionLabel} proveedor`;
+    document.getElementById('toggleProviderText').textContent = `${actionLabel} el proveedor "${button.dataset.nombre || ''}"?`;
+    const submitButton = document.getElementById('toggleProviderSubmit');
+    submitButton.textContent = actionLabel;
+    submitButton.classList.toggle('danger', nextStatus === 'inactivo');
+
+    toggleProviderModal.classList.add('open');
+    toggleProviderModal.setAttribute('aria-hidden', 'false');
   }
 
   function openDeleteProviderModal(id) {
@@ -4447,6 +5329,43 @@ include 'partials/header.php';
     warning.classList.toggle('show', message !== '');
   }
 
+  function normalizeProductName(name) {
+    return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  function findProductByName(name, ignoredId = '') {
+    const normalized = normalizeProductName(name);
+    if (!normalized) {
+      return null;
+    }
+
+    return products.find((product) => (
+      normalizeProductName(product.nombre) === normalized
+      && Number(product.id) !== Number(ignoredId || 0)
+    )) || null;
+  }
+
+  function setProductDuplicateWarning(warningId, message = '') {
+    const warning = document.getElementById(warningId);
+    if (!warning) return;
+
+    warning.textContent = message;
+    warning.classList.toggle('show', message !== '');
+  }
+
+  function updateProductDuplicateWarning(inputId, warningId, ignoredId = '') {
+    const input = document.getElementById(inputId);
+    const existing = findProductByName(input?.value || '', ignoredId);
+    const message = existing ? `Ya existe un producto con ese nombre: ${existing.nombre}` : '';
+    setProductDuplicateWarning(warningId, message);
+    input?.setCustomValidity(message);
+    return existing;
+  }
+
+  function hasProductDuplicateWarning(warningId) {
+    return document.getElementById(warningId)?.classList.contains('show') || false;
+  }
+
   function updateModalCategoryWarning() {
     const name = document.getElementById('editCategoriaNombre')?.value || '';
     const originalName = document.getElementById('editCategoriaOriginalNombre')?.value || '';
@@ -4478,6 +5397,40 @@ include 'partials/header.php';
     updateModalCategoryWarning();
   }
 
+  function openToggleCategoryModal(button) {
+    const modal = document.getElementById('toggleCategoryModal');
+    if (!modal) {
+      return;
+    }
+
+    const currentStatus = button.dataset.estado || 'activo';
+    const action = currentStatus === 'activo' ? 'desactivar' : 'activar';
+    const actionLabel = action === 'desactivar' ? 'Desactivar' : 'Activar';
+
+    document.getElementById('toggleCategoryId').value = button.dataset.id || '';
+    document.getElementById('toggleCategoryAction').value = action;
+    document.getElementById('toggleCategoryTitle').textContent = `${actionLabel} categoria`;
+    document.getElementById('toggleCategoryText').textContent = `${actionLabel} la categoria "${button.dataset.nombre || ''}"?`;
+    const submitButton = document.getElementById('toggleCategorySubmit');
+    submitButton.textContent = actionLabel;
+    submitButton.classList.toggle('danger', action === 'desactivar');
+
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+
+  function openDeleteCategoryModal(button) {
+    const modal = document.getElementById('deleteCategoryModal');
+    if (!modal) {
+      return;
+    }
+
+    document.getElementById('deleteCategoryId').value = button.dataset.id || '';
+    document.getElementById('deleteCategoryText').textContent = `Eliminar la categoria "${button.dataset.nombre || ''}"? Solo se podra eliminar si no esta usada por productos.`;
+    modal.classList.add('open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+
   function setSaleFormMode(mode, saleId = null) {
     const isEdit = mode === 'edit';
     saleForm.action = isEdit ? 'editar_venta.php' : 'guardar_venta.php';
@@ -4494,6 +5447,7 @@ include 'partials/header.php';
     setSaleFormMode('new');
     saleCart = [];
     selectedSaleProduct = null;
+    if (addSaleItemButton) addSaleItemButton.disabled = true;
     saleClienteId.value = '';
     saleClientSearch.value = '';
     ventaProductoId.value = '';
@@ -4516,9 +5470,11 @@ include 'partials/header.php';
   }
 
   function resetPurchaseForm() {
+    purchaseEditInProgress = false;
     setPurchaseFormMode('new');
     purchaseCart = [];
     selectedPurchaseProduct = null;
+    if (addPurchaseItemButton) addPurchaseItemButton.disabled = true;
     purchaseProviderId.value = '';
     purchaseProviderSearch.value = '';
     purchaseProductId.value = '';
@@ -4544,6 +5500,41 @@ include 'partials/header.php';
       return;
     }
 
+    const editCart = details
+      .map((item) => {
+        const product = products.find((productItem) => Number(productItem.id) === Number(item.producto_id)) || {
+          id: Number(item.producto_id),
+          nombre: item.producto,
+          estado: item.producto_estado || 'activo',
+          stock: Number(item.producto_stock || 0),
+          pack_cantidad: Number(item.producto_pack_cantidad || 0),
+          precio_compra: Number(item.producto_precio_compra || 0),
+          precio_compra_pack: Number(item.producto_precio_compra_pack || 0),
+          precio_venta: Number(item.producto_precio_venta || 0),
+          precio_pack: Number(item.producto_precio_pack || 0)
+        };
+
+        return {
+          product,
+          type: item.tipo_compra,
+          quantity: Number(item.cantidad || 0),
+          units: Number(item.unidades_agregadas || 0),
+          price: Number(item.precio_unitario || 0),
+          subtotal: Number(item.subtotal || 0)
+        };
+      })
+      .filter((item) => item.quantity > 0 && item.product.id > 0);
+
+    if (editCart.length === 0) {
+      showClientMessage('No se pudieron cargar los productos de esta compra para editar.');
+      return;
+    }
+
+    purchaseEditInProgress = true;
+    selectedPurchaseDetailId = null;
+    purchaseDetailModal.classList.remove('open');
+    purchaseDetailModal.setAttribute('aria-hidden', 'true');
+
     setPurchaseFormMode('edit', purchaseId);
     const provider = providers.find((item) => Number(item.id) === Number(purchase.proveedor_id));
     if (provider) {
@@ -4555,23 +5546,11 @@ include 'partials/header.php';
 
     document.getElementById('purchaseMethod').value = purchase.metodo || 'efectivo';
     purchaseForm.querySelector('[name="observacion"]').value = purchase.observacion || '';
-    purchaseCart = details
-      .map((item) => {
-        const product = products.find((productItem) => Number(productItem.id) === Number(item.producto_id));
-        if (!product) return null;
-
-        return {
-          product,
-          type: item.tipo_compra,
-          quantity: Number(item.cantidad || 0),
-          units: Number(item.unidades_agregadas || 0),
-          price: Number(item.precio_unitario || 0),
-          subtotal: Number(item.subtotal || 0)
-        };
-      })
-      .filter(Boolean);
+    purchaseCart = editCart;
+    lastPurchaseEditStartedAt = performance.now();
 
     selectedPurchaseProduct = null;
+    if (addPurchaseItemButton) addPurchaseItemButton.disabled = true;
     purchaseProductId.value = '';
     purchaseProductSearch.value = '';
     document.getElementById('purchaseType').value = 'unidad';
@@ -4579,10 +5558,7 @@ include 'partials/header.php';
     document.getElementById('purchasePrice').value = '0';
     renderPurchaseCart();
     updatePurchaseTotal();
-    purchaseDetailModal.classList.remove('open');
-    purchaseDetailModal.setAttribute('aria-hidden', 'true');
     showModule('compras');
-    purchaseForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   function startSaleEdit(saleId) {
@@ -4634,6 +5610,7 @@ include 'partials/header.php';
       .filter(Boolean);
 
     selectedSaleProduct = null;
+    if (addSaleItemButton) addSaleItemButton.disabled = true;
     ventaProductoId.value = '';
     ventaProductoSearch.value = '';
     document.getElementById('ventaTipo').value = 'unidad';
@@ -4643,7 +5620,6 @@ include 'partials/header.php';
     saleDetailModal.classList.remove('open');
     saleDetailModal.setAttribute('aria-hidden', 'true');
     showModule('ventas');
-    saleForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   document.querySelectorAll('[data-close-modal]').forEach((button) => {
@@ -4654,6 +5630,65 @@ include 'partials/header.php';
       }
       modal.classList.remove('open');
       modal.setAttribute('aria-hidden', 'true');
+    });
+  });
+
+  document.querySelectorAll('[data-edit-client]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const modal = document.getElementById('editClientModal');
+      const form = document.getElementById('editClientForm');
+      if (!modal || !form) {
+        return;
+      }
+
+      form.action = `editar_cliente.php?id=${encodeURIComponent(button.dataset.id || '')}`;
+      document.getElementById('editClientName').value = button.dataset.nombre || '';
+      document.getElementById('editClientPhone').value = button.dataset.telefono || '';
+      document.getElementById('editClientEmail').value = button.dataset.email || '';
+      document.getElementById('editClientDocument').value = button.dataset.documento || '';
+      document.getElementById('editClientAddress').value = button.dataset.direccion || '';
+      document.getElementById('editClientStatus').value = button.dataset.estado || 'activo';
+
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden', 'false');
+      document.getElementById('editClientName')?.focus();
+    });
+  });
+
+  document.querySelectorAll('[data-toggle-client]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const modal = document.getElementById('toggleClientModal');
+      const currentStatus = button.dataset.estado || 'activo';
+      const nextStatus = currentStatus === 'activo' ? 'inactivo' : 'activo';
+      const actionLabel = nextStatus === 'inactivo' ? 'Desactivar' : 'Activar';
+      if (!modal) {
+        return;
+      }
+
+      document.getElementById('toggleClientId').value = button.dataset.id || '';
+      document.getElementById('toggleClientStatus').value = nextStatus;
+      document.getElementById('toggleClientTitle').textContent = `${actionLabel} cliente`;
+      document.getElementById('toggleClientText').textContent = `${actionLabel} el cliente "${button.dataset.nombre || ''}"?`;
+      const submitButton = document.getElementById('toggleClientSubmit');
+      submitButton.textContent = actionLabel;
+      submitButton.classList.toggle('danger', nextStatus === 'inactivo');
+
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden', 'false');
+    });
+  });
+
+  document.querySelectorAll('[data-delete-client]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const modal = document.getElementById('deleteClientModal');
+      if (!modal) {
+        return;
+      }
+
+      document.getElementById('deleteClientId').value = button.dataset.id || '';
+      document.getElementById('deleteClientText').textContent = `Eliminar el cliente "${button.dataset.nombre || ''}"? Solo se podra eliminar si no esta asociado a reservas o ventas.`;
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden', 'false');
     });
   });
 
@@ -4673,16 +5708,50 @@ include 'partials/header.php';
     button.addEventListener('click', () => openProductModal(button.dataset.editProduct));
   });
 
+  document.getElementById('openProductCreateModal')?.addEventListener('click', openCreateProductModal);
+
+  document.querySelectorAll('[data-toggle-product]').forEach((button) => {
+    button.addEventListener('click', () => openToggleProductModal(button));
+  });
+
+  document.querySelectorAll('[data-delete-product]').forEach((button) => {
+    button.addEventListener('click', () => openDeleteProductModal(button));
+  });
+
   document.querySelectorAll('[data-edit-court]').forEach((button) => {
     button.addEventListener('click', () => openCourtModal(button.dataset.editCourt));
+  });
+
+  document.getElementById('openCourtCreateModal')?.addEventListener('click', openCreateCourtModal);
+
+  document.querySelectorAll('[data-delete-court]').forEach((button) => {
+    button.addEventListener('click', () => openDeleteCourtModal(button));
   });
 
   document.querySelectorAll('[data-edit-provider]').forEach((button) => {
     button.addEventListener('click', () => openProviderModal(button.dataset.editProvider));
   });
 
+  document.querySelectorAll('[data-toggle-provider]').forEach((button) => {
+    button.addEventListener('click', () => openToggleProviderModal(button));
+  });
+
   document.querySelectorAll('[data-delete-provider]').forEach((button) => {
     button.addEventListener('click', () => openDeleteProviderModal(button.dataset.deleteProvider));
+  });
+
+  document.querySelectorAll('[data-digits-only]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const maxDigits = Number(input.dataset.maxDigits || 0);
+      const digits = input.value.replace(/\D/g, '');
+      input.value = maxDigits > 0 ? digits.slice(0, maxDigits) : digits;
+    });
+  });
+
+  document.querySelectorAll('[data-ruc-input]').forEach((input) => {
+    input.addEventListener('input', () => {
+      input.value = input.value.replace(/[^0-9-]/g, '');
+    });
   });
 
   clientListSearch?.addEventListener('input', () => {
@@ -4705,6 +5774,18 @@ include 'partials/header.php';
     button.addEventListener('click', () => openCategoryModal(button.dataset.editCategory, button.dataset.categoryName, 'edit'));
   });
 
+  document.getElementById('openCategoryListModal')?.addEventListener('click', () => {
+    openCategoryModal('', '', 'create');
+  });
+
+  document.querySelectorAll('[data-toggle-category]').forEach((button) => {
+    button.addEventListener('click', () => openToggleCategoryModal(button));
+  });
+
+  document.querySelectorAll('[data-delete-category]').forEach((button) => {
+    button.addEventListener('click', () => openDeleteCategoryModal(button));
+  });
+
   cancelSaleEdit?.addEventListener('click', resetSaleForm);
   cancelPurchaseEdit?.addEventListener('click', resetPurchaseForm);
 
@@ -4720,8 +5801,23 @@ include 'partials/header.php';
     });
   });
 
-  ['editCanchaId', 'editHoraInicioHour', 'editHoraFinHour'].forEach((id) => {
-    document.getElementById(id)?.addEventListener('change', updateEditReservationPrice);
+  ['editCanchaId', 'editFecha', 'editHoraInicioHour', 'editHoraFinHour'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+      const startBefore = document.getElementById('editHoraInicioHour')?.value || '';
+      const endBefore = document.getElementById('editHoraFinHour')?.value || '';
+
+      updateEditReservationPrice();
+      validateEditReservationSchedule(true);
+
+      const startAfter = document.getElementById('editHoraInicioHour')?.value || '';
+      const endAfter = document.getElementById('editHoraFinHour')?.value || '';
+      const scheduleChangedAutomatically = id === 'editFecha'
+        && (startAfter !== startBefore || endAfter !== endBefore);
+
+      if (scheduleChangedAutomatically) {
+        showClientMessage('Ya existe otra reserva para esa cancha en la fecha y hora seleccionadas. Se cambio automaticamente al primer horario disponible.');
+      }
+    });
   });
 
   document.getElementById('modalMontoPago')?.addEventListener('input', (event) => {
@@ -4759,6 +5855,21 @@ include 'partials/header.php';
     const status = document.getElementById('editEstado')?.value || '';
     const balance = Number(form.dataset.saldo || 0);
 
+    if (!document.getElementById('editClienteId')?.value) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const searchInput = document.getElementById('editClientSearch');
+      searchInput?.setCustomValidity('Selecciona un cliente de la lista.');
+      searchInput?.reportValidity();
+      return;
+    }
+
+    if (!validateEditReservationSchedule(true)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+
     if (status === 'finalizado' && balance > 0) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -4773,9 +5884,8 @@ include 'partials/header.php';
     }
   });
 
-  document.getElementById('modalReservationDuration')?.addEventListener('change', (event) => {
-    syncReservationDuration(event.currentTarget.value);
-  });
+  document.getElementById('modalHoraInicioVisible')?.addEventListener('change', syncReservationTimesFromInputs);
+  document.getElementById('modalHoraFinVisible')?.addEventListener('change', syncReservationTimesFromInputs);
 
   document.getElementById('reservationPaymentForm')?.addEventListener('submit', (event) => {
     const form = event.currentTarget;
@@ -4849,6 +5959,19 @@ include 'partials/header.php';
 
   clientSearch?.addEventListener('focus', () => renderClientSuggestions(clientSearch.value));
 
+  const editClientSearch = document.getElementById('editClientSearch');
+  const editClienteId = document.getElementById('editClienteId');
+  const editClientSuggestions = document.getElementById('editClientSuggestions');
+  editClientSearch?.addEventListener('input', () => {
+    editClienteId.value = '';
+    editClientSearch.setCustomValidity(editClientSearch.value.trim() === '' ? '' : 'Selecciona un cliente de la lista.');
+    renderClientSuggestions(editClientSearch.value, editClientSuggestions, selectEditReservationClient);
+  });
+  editClientSearch?.addEventListener('focus', () => {
+    if (editClienteId.value) return;
+    renderClientSuggestions(editClientSearch.value, editClientSuggestions, selectEditReservationClient);
+  });
+
   saleClientSearch?.addEventListener('input', () => {
     saleClienteId.value = '';
     renderClientSuggestions(saleClientSearch.value, saleClientSuggestions, selectSaleClient, true);
@@ -4886,6 +6009,7 @@ include 'partials/header.php';
 
   ventaProductoSearch?.addEventListener('input', () => {
     selectedSaleProduct = null;
+    if (addSaleItemButton) addSaleItemButton.disabled = true;
     ventaProductoId.value = '';
     renderProductSuggestions(ventaProductoSearch.value);
     updateSaleTotal();
@@ -4929,6 +6053,7 @@ include 'partials/header.php';
 
   purchaseProductSearch?.addEventListener('input', () => {
     selectedPurchaseProduct = null;
+    if (addPurchaseItemButton) addPurchaseItemButton.disabled = true;
     purchaseProductId.value = '';
     renderPurchaseProductSuggestions(purchaseProductSearch.value);
     updatePurchasePriceForType();
@@ -4977,6 +6102,17 @@ include 'partials/header.php';
     document.querySelector('#quickClientForm input[name="nombre"]').focus();
   });
 
+  document.getElementById('openEditQuickClient')?.addEventListener('click', () => {
+    quickClientTarget = 'editReservation';
+    document.getElementById('quickClientForm')?.reset();
+    document.getElementById('quickClientDuplicateName')?.classList.remove('show');
+    editClientSuggestions.innerHTML = '';
+    editClientSuggestions.classList.remove('open');
+    quickClientModal.classList.add('open');
+    quickClientModal.setAttribute('aria-hidden', 'false');
+    document.querySelector('#quickClientForm input[name="nombre"]')?.focus();
+  });
+
   document.getElementById('openSaleQuickClient')?.addEventListener('click', () => {
     quickClientTarget = 'sale';
     saleClientSuggestions.innerHTML = '';
@@ -4984,6 +6120,15 @@ include 'partials/header.php';
     quickClientModal.classList.add('open');
     quickClientModal.setAttribute('aria-hidden', 'false');
     document.querySelector('#quickClientForm input[name="nombre"]').focus();
+  });
+
+  document.getElementById('openClientListQuickClient')?.addEventListener('click', () => {
+    quickClientTarget = 'list';
+    document.getElementById('quickClientForm')?.reset();
+    document.getElementById('quickClientDuplicateName')?.classList.remove('show');
+    quickClientModal.classList.add('open');
+    quickClientModal.setAttribute('aria-hidden', 'false');
+    document.querySelector('#quickClientForm input[name="nombre"]')?.focus();
   });
 
   function providerSearchForTarget(target) {
@@ -5006,6 +6151,14 @@ include 'partials/header.php';
     quickProviderModal.setAttribute('aria-hidden', 'false');
     document.querySelector('#quickProviderForm input[name="nombre"]').focus();
   }
+
+  document.getElementById('openProviderListQuickProvider')?.addEventListener('click', () => {
+    quickProviderTarget = 'list';
+    document.getElementById('quickProviderForm')?.reset();
+    quickProviderModal.classList.add('open');
+    quickProviderModal.setAttribute('aria-hidden', 'false');
+    document.querySelector('#quickProviderForm input[name="nombre"]')?.focus();
+  });
 
   document.getElementById('openQuickProvider')?.addEventListener('click', () => {
     openQuickProviderModal('purchase');
@@ -5047,6 +6200,7 @@ include 'partials/header.php';
     purchaseProductSuggestions.classList.remove('open');
     quickProductOpenedFromPurchase = true;
     quickProductName.value = capitalizeFirstLetter(purchaseProductSearch.value.trim());
+    quickProductName.setCustomValidity('');
     quickProductCompra.value = document.getElementById('purchasePrice')?.value || '0';
     const purchaseProvider = providers.find((provider) => Number(provider.id) === Number(purchaseProviderId?.value || 0));
     if (purchaseProvider) {
@@ -5056,6 +6210,8 @@ include 'partials/header.php';
       quickProductProviderSearch.value = '';
     }
     syncQuickProductFromPurchase();
+    updateProductDuplicateWarning('quickProductName', 'quickProductDuplicateName');
+    updateProductPriceWarnings(document.getElementById('quickProductForm'));
     quickProductModal.classList.add('open');
     quickProductModal.setAttribute('aria-hidden', 'false');
     quickProductName.focus();
@@ -5069,8 +6225,8 @@ include 'partials/header.php';
       saleClientSuggestions.classList.remove('open');
       purchaseProviderSuggestions.innerHTML = '';
       purchaseProviderSuggestions.classList.remove('open');
-      productProviderSuggestions.innerHTML = '';
-      productProviderSuggestions.classList.remove('open');
+      productProviderSuggestions?.replaceChildren();
+      productProviderSuggestions?.classList.remove('open');
       quickProductProviderSuggestions.innerHTML = '';
       quickProductProviderSuggestions.classList.remove('open');
       editProductoProveedorSuggestions.innerHTML = '';
@@ -5104,6 +6260,48 @@ include 'partials/header.php';
   });
 
   document.getElementById('editCategoriaNombre')?.addEventListener('input', updateModalCategoryWarning);
+
+  quickProductName?.addEventListener('input', () => updateProductDuplicateWarning('quickProductName', 'quickProductDuplicateName'));
+  quickProductName?.addEventListener('blur', () => updateProductDuplicateWarning('quickProductName', 'quickProductDuplicateName'));
+  document.getElementById('editProductoNombre')?.addEventListener('input', () => {
+    updateProductDuplicateWarning('editProductoNombre', 'editProductDuplicateName', document.getElementById('productForm')?.dataset.editProductId || '');
+  });
+  document.getElementById('editProductoNombre')?.addEventListener('blur', () => {
+    updateProductDuplicateWarning('editProductoNombre', 'editProductDuplicateName', document.getElementById('productForm')?.dataset.editProductId || '');
+  });
+
+  document.querySelectorAll('#productForm [name="categoria"], #productForm .money-input, #productForm [name="pack_cantidad"], #quickProductForm [name="categoria"], #quickProductForm .money-input, #quickProductForm [name="pack_cantidad"]').forEach((input) => {
+    input.addEventListener('input', () => input.setCustomValidity(''));
+    input.addEventListener('blur', () => validateProductRequiredFields(input.closest('form')));
+  });
+
+  document.querySelectorAll('#productForm [name="pack_cantidad"], #productForm [name="precio_compra_pack"], #productForm [name="precio_pack"], #quickProductForm [name="pack_cantidad"], #quickProductForm [name="precio_compra_pack"], #quickProductForm [name="precio_pack"]').forEach((input) => {
+    input.addEventListener('input', () => syncProductUnitPricesFromPack(input.closest('form')));
+    input.addEventListener('blur', () => syncProductUnitPricesFromPack(input.closest('form')));
+  });
+
+  document.querySelectorAll('#productForm [name="pack_cantidad"], #productForm [name="precio_compra_pack"], #productForm [name="precio_pack"], #productForm [name="precio_compra"], #productForm [name="precio_venta"], #quickProductForm [name="pack_cantidad"], #quickProductForm [name="precio_compra_pack"], #quickProductForm [name="precio_pack"], #quickProductForm [name="precio_compra"], #quickProductForm [name="precio_venta"]').forEach((input) => {
+    input.addEventListener('input', () => updateProductPriceWarnings(input.closest('form')));
+    input.addEventListener('blur', () => updateProductPriceWarnings(input.closest('form')));
+  });
+
+  document.getElementById('productForm')?.addEventListener('submit', (event) => {
+    const form = event.currentTarget;
+    updateProductDuplicateWarning('editProductoNombre', 'editProductDuplicateName', event.currentTarget.dataset.editProductId || '');
+    syncProductUnitPricesFromPack(form);
+    updateProductPriceWarnings(form);
+    const requiredFieldsOk = validateProductRequiredFields(form);
+    if (hasProductDuplicateWarning('editProductDuplicateName') || !requiredFieldsOk) {
+      event.preventDefault();
+      const input = document.getElementById('editProductoNombre');
+      if (hasProductDuplicateWarning('editProductDuplicateName')) {
+        input?.focus();
+        input?.reportValidity();
+      } else {
+        form.reportValidity();
+      }
+    }
+  });
 
   document.getElementById('categoryForm')?.addEventListener('submit', async (event) => {
     updateModalCategoryWarning();
@@ -5215,8 +6413,24 @@ include 'partials/header.php';
       allClients.push(data.cliente);
     }
 
+    if (quickClientTarget === 'list') {
+      if (data.existe && data.mensaje) {
+        showClientMessage(data.mensaje);
+      } else {
+        window.location.href = 'index.php#clientes';
+        window.location.reload();
+      }
+      quickClientTarget = 'reservation';
+      form.reset();
+      quickClientModal.classList.remove('open');
+      quickClientModal.setAttribute('aria-hidden', 'true');
+      return;
+    }
+
     if (quickClientTarget === 'sale') {
       selectSaleClient(data.cliente);
+    } else if (quickClientTarget === 'editReservation') {
+      selectEditReservationClient(data.cliente);
     } else {
       selectClient(data.cliente);
     }
@@ -5245,6 +6459,20 @@ include 'partials/header.php';
     if (!providers.some((provider) => Number(provider.id) === Number(data.proveedor.id))) {
       providers.push(data.proveedor);
     }
+    if (quickProviderTarget === 'list') {
+      if (data.existe && data.mensaje) {
+        showClientMessage(data.mensaje);
+      } else {
+        window.location.href = 'index.php#proveedores';
+        window.location.reload();
+      }
+      quickProviderTarget = 'purchase';
+      form.reset();
+      quickProviderModal.classList.remove('open');
+      quickProviderModal.setAttribute('aria-hidden', 'true');
+      return;
+    }
+
     if (quickProviderTarget === 'product') {
       selectProductProvider(data.proveedor);
     } else if (quickProviderTarget === 'quickProduct') {
@@ -5266,6 +6494,24 @@ include 'partials/header.php';
   document.getElementById('quickProductForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    if (form.dataset.submitting === '1') {
+      return;
+    }
+
+    updateProductDuplicateWarning('quickProductName', 'quickProductDuplicateName');
+    syncProductUnitPricesFromPack(form);
+    updateProductPriceWarnings(form);
+    const requiredFieldsOk = validateProductRequiredFields(form);
+    if (hasProductDuplicateWarning('quickProductDuplicateName') || !requiredFieldsOk) {
+      quickProductName?.focus();
+      if (hasProductDuplicateWarning('quickProductDuplicateName')) {
+        quickProductName?.reportValidity();
+      } else {
+        form.reportValidity();
+      }
+      return;
+    }
+
     let quickPurchaseStock = 0;
     if (quickProductOpenedFromPurchase) {
       const nombre = String(form.querySelector('[name="nombre"]')?.value || '').trim();
@@ -5288,17 +6534,35 @@ include 'partials/header.php';
     }
 
     prepareMoneyInputs(form);
+    form.dataset.submitting = '1';
+    const submitButton = form.querySelector('button[type="submit"]');
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.dataset.originalText = submitButton.dataset.originalText || submitButton.textContent;
+      submitButton.textContent = 'Procesando...';
+    }
+
     const productFormData = new FormData(form);
     if (quickProductOpenedFromPurchase) {
       productFormData.append('origen', 'compra');
     }
-    const response = await fetch('guardar_producto_rapido.php', {
-      method: 'POST',
-      body: productFormData
-    });
-    const data = await response.json();
+    let data;
+    try {
+      const response = await fetch('guardar_producto_rapido.php', {
+        method: 'POST',
+        body: productFormData
+      });
+      data = await response.json();
+    } catch (error) {
+      data = { ok: false, error: 'No se pudo guardar el producto.' };
+    }
 
     if (!data.ok) {
+      form.dataset.submitting = '';
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = submitButton.dataset.originalText || 'Guardar producto';
+      }
       showClientMessage(data.error || 'No se pudo guardar el producto.');
       return;
     }
@@ -5323,6 +6587,11 @@ include 'partials/header.php';
       showClientMessage(data.mensaje);
     }
     quickProductOpenedFromPurchase = false;
+    form.dataset.submitting = '';
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = submitButton.dataset.originalText || 'Guardar producto';
+    }
     form.reset();
     form.querySelectorAll('.money-input').forEach((input) => {
       input.value = '0';
@@ -5397,6 +6666,7 @@ include 'partials/header.php';
 
     const unitCost = Number(selectedPurchaseProduct.precio_compra || 0);
     const packQuantity = Number(selectedPurchaseProduct.pack_cantidad || 0);
+    const packCost = Number(selectedPurchaseProduct.precio_compra_pack || 0);
     const packAllowed = packQuantity > 0;
     if (packOption) {
       packOption.disabled = !packAllowed;
@@ -5407,12 +6677,17 @@ include 'partials/header.php';
     }
 
     const nextPrice = typeInput.value === 'pack'
-      ? unitCost * packQuantity
+      ? (packCost > 0 ? packCost : unitCost * packQuantity)
       : unitCost;
     priceInput.value = money(nextPrice);
   }
 
   function addPurchaseItem() {
+    // A successful click clears the selection and disables the button
+    // synchronously, so a second event from a rapid double click is ignored.
+    const now = performance.now();
+    if (addPurchaseItemButton?.disabled || now - lastPurchaseItemAddedAt < 700) return;
+
     const type = document.getElementById('purchaseType')?.value || 'unidad';
     const quantityInput = document.getElementById('purchaseQuantity');
     const priceInput = document.getElementById('purchasePrice');
@@ -5451,7 +6726,9 @@ include 'partials/header.php';
       });
     }
 
+    lastPurchaseItemAddedAt = performance.now();
     selectedPurchaseProduct = null;
+    if (addPurchaseItemButton) addPurchaseItemButton.disabled = true;
     purchaseProductId.value = '';
     purchaseProductSearch.value = '';
     document.getElementById('purchaseType').value = 'unidad';
@@ -5466,6 +6743,7 @@ include 'partials/header.php';
     const total = cartTotal(saleCart);
     const received = Number(moneyDigits(checkoutReceived.value) || 0);
     checkoutChange.textContent = money(Math.max(0, received - total));
+    checkoutReceived.setCustomValidity('');
   }
 
   function openSaleCheckoutModal() {
@@ -5530,7 +6808,7 @@ include 'partials/header.php';
           th, td { border-bottom: 1px dashed #999; padding: 4px 0; text-align: left; }
           th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4) { text-align: right; }
           .items-count { border-top: 1px solid #111; padding-top: 8px; font-weight: 700; }
-          .total { font-size: 15px; font-weight: 700; border-top: 1px solid #111; padding-top: 8px; }
+          .total { display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: 700; border-top: 1px solid #111; padding-top: 8px; }
         </style>
       </head>
       <body>
@@ -5543,7 +6821,7 @@ include 'partials/header.php';
           <tbody>${rows}</tbody>
         </table>
         <p class="items-count">Items: ${itemCount}</p>
-        <p class="total">Total: ${money(ticketData.total)}</p>
+        <p class="total"><span>Total:</span><span>${money(ticketData.total)}</span></p>
       </body>
       </html>
     `;
@@ -5561,6 +6839,27 @@ include 'partials/header.php';
     ticket.focus();
     ticket.print();
     return true;
+  }
+
+  function submitConfirmedSale(button) {
+    saleSubmitConfirmed = true;
+    lockSubmitForm(saleForm, button);
+    prepareMoneyInputs(saleForm);
+    saleForm.submit();
+  }
+
+  function openSaleTicketPreview(ticketHtml = saleTicketHtml()) {
+    saleTicketPreviewFrame.srcdoc = ticketHtml;
+    saleCheckoutModal.classList.remove('open');
+    saleCheckoutModal.setAttribute('aria-hidden', 'true');
+    saleTicketPreviewModal.classList.add('open');
+    saleTicketPreviewModal.setAttribute('aria-hidden', 'false');
+  }
+
+  function finishRegisteredSaleTicket() {
+    saleTicketPreviewModal.classList.remove('open');
+    saleTicketPreviewModal.setAttribute('aria-hidden', 'true');
+    window.location.reload();
   }
 
   function cashCloseTicketHtml(ticketData = cashTicketData) {
@@ -5594,7 +6893,9 @@ include 'partials/header.php';
       <body>
         <h1>Cierre de caja</h1>
         <p>Apertura: ${escapeHtml(ticketData.abierta_en || '-')}</p>
+        <p>Usuario apertura: ${escapeHtml(ticketData.usuario_apertura || '-')}</p>
         <p>Cierre: ${escapeHtml(cierreFecha)}</p>
+        <p>Usuario cierre: ${escapeHtml(ticketData.usuario_cierre || '-')}</p>
         <p>Monto inicial: ${money(ticketData.monto_inicial)}</p>
         <p>Saldo esperado: ${money(ticketData.saldo_total)}</p>
         <p>Efectivo contado: ${money(efectivoContado)}</p>
@@ -5644,6 +6945,8 @@ include 'partials/header.php';
   }
 
   function openPurchaseDetailModal(purchaseId) {
+    if (purchaseEditInProgress) return;
+
     const purchase = purchases.find((item) => Number(item.id) === Number(purchaseId));
     const details = purchaseItemsById(purchaseId);
     if (!purchase || details.length === 0) return;
@@ -5653,6 +6956,8 @@ include 'partials/header.php';
     const isCanceled = purchase.estado === 'anulada';
     cancelPurchaseButton.hidden = isCanceled;
     editPurchaseFromDetail.hidden = isCanceled;
+    cancelPurchaseButton.disabled = !isCanceled;
+    editPurchaseFromDetail.disabled = !isCanceled;
     purchaseDetailSummary.innerHTML = `
       <dl>
         <div><dt>Fecha</dt><dd>${escapeHtml(new Date(purchase.fecha_compra).toLocaleString('es-PY'))}</dd></div>
@@ -5682,6 +6987,12 @@ include 'partials/header.php';
     `;
     purchaseDetailModal.classList.add('open');
     purchaseDetailModal.setAttribute('aria-hidden', 'false');
+    if (!isCanceled) {
+      setTimeout(() => {
+        cancelPurchaseButton.disabled = false;
+        editPurchaseFromDetail.disabled = false;
+      }, 600);
+    }
   }
 
   function openSaleDetailModal(saleId) {
@@ -5694,6 +7005,8 @@ include 'partials/header.php';
     const isCanceled = sale.estado === 'anulada';
     cancelSaleButton.hidden = isCanceled;
     editSaleFromDetail.hidden = isCanceled;
+    cancelSaleButton.disabled = !isCanceled;
+    editSaleFromDetail.disabled = !isCanceled;
     saleDetailSummary.innerHTML = `
       <dl>
         <div><dt>Fecha</dt><dd>${escapeHtml(new Date(sale.fecha_venta).toLocaleString('es-PY'))}</dd></div>
@@ -5701,7 +7014,7 @@ include 'partials/header.php';
         <div><dt>Metodo</dt><dd>${escapeHtml(sale.metodo)}</dd></div>
         <div><dt>Estado</dt><dd>${escapeHtml(sale.estado || 'activa')}</dd></div>
         <div><dt>Total</dt><dd>${money(sale.total)}</dd></div>
-        ${sale.reserva_cancha ? `<div><dt>Reserva</dt><dd>${escapeHtml(sale.reserva_cancha)} - ${escapeHtml(sale.reserva_fecha)}</dd></div>` : ''}
+        ${sale.reserva_cancha ? `<div><dt>Reserva</dt><dd>${escapeHtml(sale.reserva_cancha)} - R#${Number(sale.reserva_id)} - ${escapeHtml(sale.reserva_fecha)}</dd></div>` : ''}
       </dl>
     `;
     saleDetailItems.innerHTML = `
@@ -5723,6 +7036,12 @@ include 'partials/header.php';
     `;
     saleDetailModal.classList.add('open');
     saleDetailModal.setAttribute('aria-hidden', 'false');
+    if (!isCanceled) {
+      setTimeout(() => {
+        cancelSaleButton.disabled = false;
+        editSaleFromDetail.disabled = false;
+      }, 600);
+    }
   }
 
   function updateReservationSaleTotal() {
@@ -5783,8 +7102,8 @@ include 'partials/header.php';
   });
   document.getElementById('reservaVentaTipo')?.addEventListener('change', updateReservationSaleTotal);
   document.getElementById('reservaVentaCantidad')?.addEventListener('input', updateReservationSaleTotal);
-  document.getElementById('addSaleItem')?.addEventListener('click', () => addCartItem('sale'));
-  document.getElementById('addPurchaseItem')?.addEventListener('click', addPurchaseItem);
+  addSaleItemButton?.addEventListener('click', () => addCartItem('sale'));
+  addPurchaseItemButton?.addEventListener('click', addPurchaseItem);
   document.getElementById('addReservationSaleItem')?.addEventListener('click', () => addCartItem('reservation'));
 
   document.addEventListener('click', (event) => {
@@ -5830,11 +7149,39 @@ include 'partials/header.php';
     updateCartQuantity(cartName, index, input.value);
   });
 
+  document.addEventListener('input', (event) => {
+    const cartQuantityInput = event.target.closest('[data-cart-quantity]');
+    if (cartQuantityInput) {
+      updateCartQuantityLive(cartQuantityInput);
+      return;
+    }
+
+    const purchasePriceInput = event.target.closest('[data-purchase-price]');
+    if (!purchasePriceInput) return;
+    updatePurchaseCartPrice(Number(purchasePriceInput.dataset.purchasePrice), purchasePriceInput);
+  });
+
   document.getElementById('purchaseForm')?.addEventListener('submit', (event) => {
+    if (performance.now() - lastPurchaseEditStartedAt < 700) {
+      event.preventDefault();
+      return;
+    }
     if (purchaseCart.length === 0) {
       event.preventDefault();
       showClientMessage('Agrega al menos un producto a la compra.');
+      return;
     }
+
+    const invalidPrice = purchaseCart.some((item) => Number(item.price || 0) <= 0);
+    if (invalidPrice) {
+      event.preventDefault();
+      showClientMessage('Todos los productos deben tener un precio de compra valido.');
+      return;
+    }
+
+    // Rebuild the POST fields at the last possible moment so the server always
+    // receives the current quantities and edited prices from the cart.
+    renderPurchaseCart();
   });
 
   saleForm?.addEventListener('submit', (event) => {
@@ -5916,35 +7263,88 @@ include 'partials/header.php';
     updateCheckoutChange();
   });
 
-  document.getElementById('confirmSaleSubmit')?.addEventListener('click', (event) => {
+  document.getElementById('confirmSaleSubmit')?.addEventListener('click', async (event) => {
     if (saleForm?.dataset.submitting === '1') {
       return;
     }
 
-    document.getElementById('saleMethod').value = checkoutMethod.value || 'efectivo';
-    if (checkoutPrintTicket.checked && !printSaleTicket()) {
+    const total = cartTotal(saleCart);
+    const received = Number(moneyDigits(checkoutReceived.value) || 0);
+    if (checkoutMethod.value === 'efectivo' && received < total) {
+      checkoutReceived.setCustomValidity(`El monto recibido debe ser igual o mayor a ${money(total)}.`);
+      checkoutReceived.reportValidity();
+      checkoutReceived.focus();
+      checkoutReceived.select();
       return;
     }
 
-    saleSubmitConfirmed = true;
-    lockSubmitForm(saleForm, event.currentTarget);
-    prepareMoneyInputs(saleForm);
-    saleForm.submit();
+    document.getElementById('saleMethod').value = checkoutMethod.value || 'efectivo';
+    if (checkoutPrintTicket.checked) {
+      const submitButton = event.currentTarget;
+      const ticketHtml = saleTicketHtml();
+      saleForm.dataset.submitting = '1';
+      submitButton.disabled = true;
+      submitButton.textContent = 'Registrando...';
+      prepareMoneyInputs(saleForm);
+
+      try {
+        const response = await fetch(saleForm.action, {
+          method: 'POST',
+          body: new FormData(saleForm),
+          credentials: 'same-origin'
+        });
+        if (!response.ok) throw new Error('No se pudo registrar la venta.');
+        if (response.url.includes('venta_error=')) {
+          window.location.href = response.url;
+          return;
+        }
+        openSaleTicketPreview(ticketHtml);
+      } catch (error) {
+        saleForm.dataset.submitting = '';
+        submitButton.disabled = false;
+        submitButton.textContent = 'Confirmar venta';
+        showClientMessage(error.message || 'No se pudo registrar la venta.');
+      }
+      return;
+    }
+
+    submitConfirmedSale(event.currentTarget);
   });
 
-  document.querySelectorAll('[data-sale-id]').forEach((row) => {
-    row.addEventListener('click', () => openSaleDetailModal(row.dataset.saleId));
+  document.getElementById('cancelSaleTicketPrint')?.addEventListener('click', finishRegisteredSaleTicket);
+  document.getElementById('closeSaleTicketPreview')?.addEventListener('click', finishRegisteredSaleTicket);
+
+  document.getElementById('printRegisteredSaleTicket')?.addEventListener('click', () => {
+    const ticketWindow = saleTicketPreviewFrame?.contentWindow;
+    if (ticketWindow) {
+      ticketWindow.focus();
+      ticketWindow.print();
+    }
+    finishRegisteredSaleTicket();
   });
+
+  function bindSaleRows(scope = document) {
+    scope.querySelectorAll('[data-sale-id]').forEach((row) => {
+      row.addEventListener('click', () => openSaleDetailModal(row.dataset.saleId));
+    });
+  }
+
+  bindSaleRows();
 
   function bindPurchaseRows(scope = document) {
     scope.querySelectorAll('[data-purchase-id]').forEach((row) => {
-      row.addEventListener('click', () => openPurchaseDetailModal(row.dataset.purchaseId));
+      row.addEventListener('click', () => {
+        if (performance.now() - lastPurchaseEditStartedAt < 700) return;
+        openPurchaseDetailModal(row.dataset.purchaseId);
+      });
     });
   }
 
   bindPurchaseRows();
 
-  editPurchaseFromDetail?.addEventListener('click', () => {
+  editPurchaseFromDetail?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     if (selectedPurchaseDetailId) {
       startPurchaseEdit(selectedPurchaseDetailId);
     }
@@ -5970,7 +7370,9 @@ include 'partials/header.php';
     });
   });
 
-  editSaleFromDetail?.addEventListener('click', () => {
+  editSaleFromDetail?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     if (selectedSaleDetailId) {
       startSaleEdit(selectedSaleDetailId);
     }
@@ -6043,32 +7445,60 @@ include 'partials/header.php';
 
   function productInventoryRow(product) {
     const isActive = product.estado === 'activo';
+    const purchasePack = Number(product.pack_cantidad || 0) > 0
+      ? money(product.precio_compra_pack)
+      : '-';
     const pack = Number(product.pack_cantidad || 0) > 0
       ? `${Number(product.pack_cantidad)} un. / ${money(product.precio_pack)}`
       : '-';
+    <?php if (!$esAdministrador): ?>
     return `
-      <tr>
+      <tr data-product-row>
+        <td>${escapeHtml(product.nombre)}</td>
+        <td>${escapeHtml(product.codigo_barra || '-')}</td>
+        <td>${escapeHtml(product.proveedor || '-')}</td>
+        <td>${escapeHtml(product.categoria || '-')}</td>
+        <td>${money(product.precio_venta)}</td>
+        <td>${pack}</td>
+        <td>${Number(product.stock || 0)}</td>
+        <td><span class="badge ${escapeHtml(product.estado)}">${escapeHtml(product.estado)}</span></td>
+      </tr>
+    `;
+    <?php else: ?>
+    return `
+      <tr data-product-row>
         <td>${escapeHtml(product.nombre)}</td>
         <td>${escapeHtml(product.codigo_barra || '-')}</td>
         <td>${escapeHtml(product.proveedor || '-')}</td>
         <td>${escapeHtml(product.categoria || '-')}</td>
         <td>${money(product.precio_compra)}</td>
         <td>${money(product.precio_venta)}</td>
+        <td>${purchasePack}</td>
         <td>${pack}</td>
         <td>${Number(product.stock || 0)}</td>
         <td><span class="badge ${escapeHtml(product.estado)}">${escapeHtml(product.estado)}</span></td>
         <td>
-          <div class="actions">
+          <div class="product-row-actions">
             <button type="button" class="small secondary" data-edit-product="${Number(product.id)}">Editar</button>
-            <form action="cambiar_estado_producto.php" method="post" class="inline-form">
-              <input type="hidden" name="producto_id" value="${Number(product.id)}">
-              <input type="hidden" name="estado" value="${isActive ? 'inactivo' : 'activo'}">
-              <button type="submit" class="small ${isActive ? 'danger' : ''}">${isActive ? 'Desactivar' : 'Activar'}</button>
-            </form>
+            <button type="button" class="small ${isActive ? 'danger' : ''}" data-toggle-product data-id="${Number(product.id)}" data-nombre="${escapeHtml(product.nombre)}" data-estado="${escapeHtml(product.estado || 'activo')}">${isActive ? 'Desactivar' : 'Activar'}</button>
+            <button type="button" class="small danger" data-delete-product data-id="${Number(product.id)}" data-nombre="${escapeHtml(product.nombre)}">Eliminar</button>
           </div>
         </td>
       </tr>
     `;
+    <?php endif; ?>
+  }
+
+  function bindProductInventoryActions(scope = document) {
+    scope.querySelectorAll('[data-edit-product]').forEach((button) => {
+      button.addEventListener('click', () => openProductModal(button.dataset.editProduct));
+    });
+    scope.querySelectorAll('[data-toggle-product]').forEach((button) => {
+      button.addEventListener('click', () => openToggleProductModal(button));
+    });
+    scope.querySelectorAll('[data-delete-product]').forEach((button) => {
+      button.addEventListener('click', () => openDeleteProductModal(button));
+    });
   }
 
   function renderProductInventorySearch(forceCurrent = false) {
@@ -6080,9 +7510,7 @@ include 'partials/header.php';
       if (productInventoryPagination) {
         productInventoryPagination.hidden = false;
       }
-      productInventoryRows.querySelectorAll('[data-edit-product]').forEach((button) => {
-        button.addEventListener('click', () => openProductModal(button.dataset.editProduct));
-      });
+      bindProductInventoryActions(productInventoryRows);
       return;
     }
     const matches = term === ''
@@ -6090,19 +7518,71 @@ include 'partials/header.php';
       : products.filter((product) => `${product.nombre} ${product.codigo_barra || ''} ${product.proveedor || ''} ${product.categoria || ''} ${product.estado || ''}`.toLowerCase().includes(term));
     productInventoryRows.innerHTML = matches.length
       ? matches.map(productInventoryRow).join('')
-      : '<tr><td colspan="10">No se encontraron productos con esa busqueda.</td></tr>';
+      : '<tr><td colspan="<?= $esAdministrador ? 11 : 8 ?>">No se encontraron productos con esa busqueda.</td></tr>';
     productInventoryCount.textContent = `${matches.length} producto(s)${term ? ' encontrados' : ''}`;
     if (productInventoryPagination) {
       productInventoryPagination.hidden = true;
     }
-    productInventoryRows.querySelectorAll('[data-edit-product]').forEach((button) => {
-      button.addEventListener('click', () => openProductModal(button.dataset.editProduct));
-    });
+    bindProductInventoryActions(productInventoryRows);
   }
 
   productInventorySearch?.addEventListener('input', () => {
     renderProductInventorySearch();
   });
+
+  const saleListSearch = document.getElementById('saleListSearch');
+  const saleListRows = document.getElementById('saleListRows');
+  const saleSearchCount = document.getElementById('saleSearchCount');
+  const saleListPagination = document.getElementById('saleListPagination');
+  const initialSaleListRows = saleListRows?.innerHTML || '';
+  const initialSaleSearchCount = saleSearchCount?.textContent || '';
+
+  function saleSearchText(sale) {
+    const details = saleItemsById(sale.id)
+      .map((item) => `${item.producto} ${item.tipo_venta || ''}`)
+      .join(' ');
+    return normalizeSearchText(`${sale.id} ${sale.cliente || 'Sin cliente'} ${sale.metodo || ''} ${sale.estado || ''} ${sale.reserva_cancha || ''} ${sale.reserva_id ? `R#${sale.reserva_id}` : ''} ${details}`);
+  }
+
+  function saleListRow(sale) {
+    return `
+      <tr class="clickable-row ${sale.estado === 'anulada' ? 'sale-canceled' : ''}" data-sale-id="${Number(sale.id)}">
+        <td>#${Number(sale.id)}</td>
+        <td>${escapeHtml(formatDateTime(sale.fecha_venta))}</td>
+        <td>${escapeHtml(sale.cliente || 'Sin cliente')}</td>
+        <td>
+          ${Number(sale.items || 0)} producto(s)
+          <span>${Number(sale.unidades || 0)} unidad(es)${sale.reserva_cancha ? ` - ${escapeHtml(sale.reserva_cancha)} - R#${Number(sale.reserva_id)}` : ''}</span>
+        </td>
+        <td>${escapeHtml(sale.metodo)}</td>
+        <td><span class="badge ${escapeHtml(sale.estado)}">${escapeHtml(sale.estado)}</span></td>
+        <td>${money(sale.total)}</td>
+      </tr>
+    `;
+  }
+
+  function renderSaleListSearch() {
+    if (!saleListRows || !saleListSearch) return;
+    const term = normalizeSearchText(saleListSearch.value.trim());
+    if (term === '') {
+      saleListRows.innerHTML = initialSaleListRows;
+      saleSearchCount.textContent = initialSaleSearchCount;
+      if (saleListPagination) saleListPagination.hidden = false;
+      bindSaleRows(saleListRows);
+      return;
+    }
+    const matches = sales.filter((sale) => saleSearchText(sale).includes(term));
+    saleListRows.innerHTML = matches.length
+      ? matches.map(saleListRow).join('')
+      : '<tr><td colspan="7">No se encontraron ventas con esa busqueda.</td></tr>';
+    saleSearchCount.textContent = `${matches.length} venta(s) encontradas`;
+    if (saleListPagination) saleListPagination.hidden = true;
+    bindSaleRows(saleListRows);
+  }
+
+  saleListSearch?.addEventListener('input', renderSaleListSearch);
+  saleListSearch?.addEventListener('search', renderSaleListSearch);
+  if (saleListSearch?.value.trim()) renderSaleListSearch();
 
   const purchaseListSearch = document.getElementById('purchaseListSearch');
   const purchaseListRows = document.getElementById('purchaseListRows');
@@ -6125,21 +7605,6 @@ include 'partials/header.php';
       .toLowerCase();
   }
 
-  function looseSearchMatch(text, term) {
-    if (text.includes(term)) {
-      return true;
-    }
-    let position = 0;
-    for (const char of term) {
-      position = text.indexOf(char, position);
-      if (position === -1) {
-        return false;
-      }
-      position += 1;
-    }
-    return term.length >= 2;
-  }
-
   function formatDateTime(value) {
     const [datePart, timePart = '00:00:00'] = String(value || '').split(' ');
     const [year, month, day] = datePart.split('-');
@@ -6149,6 +7614,7 @@ include 'partials/header.php';
   function purchaseListRow(purchase) {
     return `
       <tr class="clickable-row ${purchase.estado === 'anulada' ? 'sale-canceled' : ''}" data-purchase-id="${Number(purchase.id)}">
+        <td>#${Number(purchase.id)}</td>
         <td>${escapeHtml(formatDateTime(purchase.fecha_compra))}</td>
         <td>${escapeHtml(purchase.proveedor || 'Sin proveedor')}</td>
         <td>
@@ -6174,10 +7640,10 @@ include 'partials/header.php';
       bindPurchaseRows(purchaseListRows);
       return;
     }
-    const matches = purchases.filter((purchase) => looseSearchMatch(purchaseSearchText(purchase), term));
+    const matches = purchases.filter((purchase) => purchaseSearchText(purchase).includes(term));
     purchaseListRows.innerHTML = matches.length
       ? matches.map(purchaseListRow).join('')
-      : '<tr><td colspan="6">No se encontraron compras con esa busqueda.</td></tr>';
+      : '<tr><td colspan="7">No se encontraron compras con esa busqueda.</td></tr>';
     purchaseSearchCount.textContent = `${matches.length} compra(s) encontradas`;
     if (purchaseListPagination) {
       purchaseListPagination.hidden = true;
@@ -6186,6 +7652,8 @@ include 'partials/header.php';
   }
 
   purchaseListSearch?.addEventListener('input', renderPurchaseListSearch);
+  purchaseListSearch?.addEventListener('search', renderPurchaseListSearch);
+  if (purchaseListSearch?.value.trim()) renderPurchaseListSearch();
 
   const userEditModal = document.getElementById('userEditModal');
   const editUserId = document.getElementById('editUserId');
@@ -6204,7 +7672,7 @@ include 'partials/header.php';
       editUserPassword.value = '';
       editUserPassword.type = 'password';
       toggleEditPassword.textContent = 'Ver';
-      editUserRole.value = button.dataset.userRole || 'usuario';
+      editUserRole.value = button.dataset.userRole || 'secretario';
       editUserStatus.value = button.dataset.userStatus || 'activo';
       userEditModal.classList.add('open');
       userEditModal.setAttribute('aria-hidden', 'false');
@@ -6243,6 +7711,7 @@ include 'partials/header.php';
   updateReservationMenuNotification();
   renderCalendar();
   setInterval(refreshReservationsFeed, 5000);
+  setInterval(refreshCashModuleIfIdle, 7000);
   if (ventaProductoId?.value) {
     const restoredProduct = products.find((product) => Number(product.id) === Number(ventaProductoId.value));
     if (restoredProduct) {

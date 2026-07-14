@@ -12,6 +12,7 @@ $categoria = trim($_POST['categoria'] ?? '');
 $precioCompra = leerMonto($_POST['precio_compra'] ?? 0);
 $precioVenta = leerMonto($_POST['precio_venta'] ?? 0);
 $packCantidad = (int)($_POST['pack_cantidad'] ?? 0);
+$precioCompraPack = leerMonto($_POST['precio_compra_pack'] ?? 0);
 $precioPack = leerMonto($_POST['precio_pack'] ?? 0);
 $stock = (int)($_POST['stock'] ?? 0);
 
@@ -24,12 +25,33 @@ if ($nombre === '') {
     volverProducto('El nombre del producto es obligatorio.');
 }
 
-if ($precioCompra < 0 || $precioVenta < 0 || $packCantidad < 0 || $precioPack < 0 || $stock < 0) {
+if ($precioCompra < 0 || $precioVenta < 0 || $packCantidad < 0 || $precioCompraPack < 0 || $precioPack < 0 || $stock < 0) {
     volverProducto('Precios, pack y stock deben ser valores validos.');
+}
+
+if ($packCantidad > 0 && $precioCompra <= 0 && $precioCompraPack > 0) {
+    $precioCompra = ceil($precioCompraPack / $packCantidad);
+}
+
+if ($categoria === '') {
+    volverProducto('La categoria del producto es obligatoria.');
+}
+
+if ($precioCompra <= 0 || $precioVenta <= 0) {
+    volverProducto('Ingresa precio de compra unidad y precio de venta unidad mayores a cero.');
+}
+
+if ($packCantidad > 0 && ($precioCompraPack <= 0 || $precioPack <= 0)) {
+    volverProducto('Si cargas unidades por pack, ingresa precio compra pack y precio de venta pack.');
+}
+
+if ($packCantidad <= 0 && ($precioCompraPack > 0 || $precioPack > 0)) {
+    volverProducto('Para usar precios por pack, ingresa tambien las unidades por pack.');
 }
 
 $pdo = conectarDB();
 $pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS proveedor_id INT DEFAULT NULL AFTER categoria");
+$pdo->exec("ALTER TABLE productos ADD COLUMN IF NOT EXISTS precio_compra_pack DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER pack_cantidad");
 $pdo->exec(
     "CREATE TABLE IF NOT EXISTS producto_categorias (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -78,8 +100,8 @@ if ($categoria !== '') {
 }
 
 $stmt = $pdo->prepare(
-    'INSERT INTO productos (nombre, codigo_barra, proveedor_id, categoria, precio_compra, precio_venta, pack_cantidad, precio_pack, stock)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO productos (nombre, codigo_barra, proveedor_id, categoria, precio_compra, precio_venta, pack_cantidad, precio_compra_pack, precio_pack, stock)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 $stmt->execute([
     $nombre,
@@ -89,6 +111,7 @@ $stmt->execute([
     $precioCompra,
     $precioVenta,
     $packCantidad,
+    $precioCompraPack,
     $precioPack,
     $stock,
 ]);

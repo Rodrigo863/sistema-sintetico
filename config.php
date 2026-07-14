@@ -77,7 +77,7 @@ function asegurarTablaUsuarios(PDO $pdo): void
           nombre VARCHAR(120) NOT NULL,
           usuario VARCHAR(60) NOT NULL,
           password_hash VARCHAR(255) NOT NULL,
-          rol ENUM('administrador', 'usuario') NOT NULL DEFAULT 'usuario',
+          rol ENUM('administrador', 'secretario') NOT NULL DEFAULT 'secretario',
           estado ENUM('activo', 'inactivo') NOT NULL DEFAULT 'activo',
           ultimo_acceso DATETIME DEFAULT NULL,
           creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -85,6 +85,16 @@ function asegurarTablaUsuarios(PDO $pdo): void
           UNIQUE KEY uq_usuarios_usuario (usuario)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     );
+
+    $tipoRol = (string)$pdo->query(
+        "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'rol'"
+    )->fetchColumn();
+    if (!str_contains($tipoRol, 'secretario')) {
+        $pdo->exec("ALTER TABLE usuarios MODIFY rol ENUM('administrador', 'usuario', 'secretario') NOT NULL DEFAULT 'secretario'");
+        $pdo->exec("UPDATE usuarios SET rol = 'secretario' WHERE rol = 'usuario'");
+        $pdo->exec("ALTER TABLE usuarios MODIFY rol ENUM('administrador', 'secretario') NOT NULL DEFAULT 'secretario'");
+    }
 
     $stmt = $pdo->prepare("SELECT id FROM usuarios WHERE usuario = ? LIMIT 1");
     $stmt->execute([ADMIN_USER]);
@@ -125,6 +135,23 @@ function usuarioActual(): ?array
     return $_SESSION['usuario'] ?? null;
 }
 
+function esAdministrador(): bool
+{
+    return (usuarioActual()['rol'] ?? '') === 'administrador';
+}
+
+function requiereAdministradorModulo(string $modulo = 'caja'): void
+{
+    requiereLogin();
+
+    if (esAdministrador()) {
+        return;
+    }
+
+    $_SESSION['acceso_error'] = 'Tu rol de secretario no tiene permiso para acceder a esa funcion.';
+    redirigir('index.php#' . preg_replace('/[^a-z0-9_-]/i', '', $modulo));
+}
+
 function iniciarSesionSistema(string $usuario, string $password): bool
 {
     $usuario = trim($usuario);
@@ -155,7 +182,7 @@ function requiereAdministrador(): void
 {
     requiereLogin();
 
-    if ((usuarioActual()['rol'] ?? '') === 'administrador') {
+    if (esAdministrador()) {
         return;
     }
 
@@ -200,4 +227,17 @@ $rutasPublicas = [
 
 if (!in_array($archivoActual, $rutasPublicas, true)) {
     requiereLogin();
+}
+
+$rutasSoloAdministrador = [
+    'guardar_proveedor.php', 'guardar_proveedor_rapido.php', 'editar_proveedor.php', 'eliminar_proveedor.php',
+    'guardar_cancha.php', 'editar_cancha.php', 'eliminar_cancha.php',
+    'guardar_categoria.php', 'editar_categoria.php', 'eliminar_categoria.php',
+    'guardar_producto.php', 'guardar_producto_rapido.php', 'editar_producto.php', 'eliminar_producto.php', 'cambiar_estado_producto.php',
+    'guardar_compra.php', 'editar_compra.php', 'anular_compra.php',
+    'reportes_pdf.php', 'reportes_descargar_pdf.php',
+];
+
+if (in_array($archivoActual, $rutasSoloAdministrador, true)) {
+    requiereAdministradorModulo();
 }

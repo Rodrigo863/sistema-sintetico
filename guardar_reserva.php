@@ -6,6 +6,31 @@ function volverConErrorReserva(string $mensaje): void
     redirigir('index.php?reserva_error=' . urlencode($mensaje) . '#reservas');
 }
 
+function normalizarHoraReserva(string $hora, bool $permite24 = false): ?string
+{
+    if (!preg_match('/^(\d{1,2}):(00|30)(?::00)?$/', trim($hora), $coincidencias)) {
+        return null;
+    }
+
+    $horas = (int)$coincidencias[1];
+    $minutos = $coincidencias[2];
+    if ($horas === 24 && $minutos === '00' && $permite24) {
+        return '24:00:00';
+    }
+
+    if ($horas < 0 || $horas > 23) {
+        return null;
+    }
+
+    return sprintf('%02d:%s:00', $horas, $minutos);
+}
+
+function horaReservaAHoras(string $hora): float
+{
+    [$horas, $minutos] = array_map('intval', explode(':', $hora));
+    return $horas + ($minutos / 60);
+}
+
 function guardarComprobanteReserva(): ?string
 {
     if (empty($_FILES['comprobante_pago']['name'])) {
@@ -64,6 +89,12 @@ if ($clienteId <= 0 || $canchaId <= 0 || $fecha === '' || $horaInicio === '' || 
     volverConErrorReserva('Completa cliente, cancha, fecha y horario.');
 }
 
+$horaInicio = normalizarHoraReserva($horaInicio);
+$horaFin = normalizarHoraReserva($horaFin, true);
+if ($horaInicio === null || $horaFin === null) {
+    volverConErrorReserva('El horario debe ser en bloques de 30 minutos, por ejemplo 18:30 a 19:30.');
+}
+
 if ($fecha < date('Y-m-d')) {
     volverConErrorReserva('No se pueden crear reservas en fechas anteriores a hoy.');
 }
@@ -74,6 +105,10 @@ if ($fecha === date('Y-m-d') && $horaInicio <= date('H:i:s')) {
 
 if ($horaFin <= $horaInicio) {
     volverConErrorReserva('La hora de fin debe ser mayor a la hora de inicio.');
+}
+
+if ((horaReservaAHoras($horaFin) - horaReservaAHoras($horaInicio)) < 1) {
+    volverConErrorReserva('La duracion minima de alquiler es 1 hora.');
 }
 
 if ($montoPago > 0 && $montoPago < 20000) {

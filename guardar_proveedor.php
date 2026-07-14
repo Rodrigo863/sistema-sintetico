@@ -25,12 +25,28 @@ if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
     volverProveedor('El email del proveedor no es valido.');
 }
 
+if ($telefono !== '' && !preg_match('/^\d{10}$/', $telefono)) {
+    volverProveedor('El telefono del proveedor debe tener exactamente 10 numeros.');
+}
+
+if ($ruc !== '' && !preg_match('/^[0-9-]+$/', $ruc)) {
+    volverProveedor('El RUC / Documento solo puede contener numeros y guion.');
+}
+
 $pdo = conectarDB();
 
 $stmt = $pdo->prepare('SELECT id FROM proveedores WHERE LOWER(TRIM(nombre)) = LOWER(TRIM(?)) LIMIT 1');
 $stmt->execute([$nombre]);
 if ($stmt->fetch()) {
     volverProveedor('Ya existe un proveedor con ese nombre.');
+}
+
+if ($ruc !== '') {
+    $stmt = $pdo->prepare('SELECT id FROM proveedores WHERE ruc = ? LIMIT 1');
+    $stmt->execute([$ruc]);
+    if ($stmt->fetch()) {
+        volverProveedor('Ya existe un proveedor con ese RUC / Documento.');
+    }
 }
 
 $stmt = $pdo->prepare(
